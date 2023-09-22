@@ -1,1 +1,31 @@
-
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Virtual Machine Terminal</title>
+</head>
+<body>
+    <h1>Virtual Machine Terminal</h1>
+    <form id="terminal-form">
+        <input type="text" id="command" placeholder="Enter a command" />
+        <button type="submit">Execute</button>
+    </form>
+    <div id="output"></div>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        $(document).ready(function () {
+            $('#terminal-form').submit(function (e) {
+                e.preventDefault();
+                var command = $('#command').val();
+                $.ajax({
+                    type: 'POST',
+                    url: '/execute_command',
+                    data: { 'command': command },
+                    success: function (data) {
+                        $('#output').text(data.output);
+                    }
+                });
+            });
+        });
+    </script>
+</body>
+</html>
