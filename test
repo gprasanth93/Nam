@@ -11,6 +11,7 @@
       margin: 0;
       padding: 0;
       background-color: #f0f2f5;
+      transition: background-color 0.3s;
     }
 
     header {
@@ -35,6 +36,7 @@
       margin-bottom: 20px;
       border-radius: 8px;
       box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      transition: background-color 0.3s;
     }
 
     .feed-header {
@@ -76,6 +78,102 @@
     .action-icon:hover {
       color: #1877f2;
     }
+
+    #dark-mode-toggle {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      cursor: pointer;
+      color: #606770;
+      transition: color 0.3s;
+    }
+
+    #dark-mode-toggle:hover {
+      color: #1877f2;
+    }
+
+    #dark-mode-toggle i {
+      font-size: 1.5em;
+    }
+
+    #create-form {
+      margin: 20px;
+      background-color: white;
+      border-radius: 8px;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+      transition: background-color 0.3s;
+    }
+
+    label {
+      font-weight: bold;
+      display: block;
+      margin: 10px;
+    }
+
+    input, textarea {
+      width: calc(100% - 20px);
+      padding: 10px;
+      margin: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      box-sizing: border-box;
+    }
+
+    button {
+      width: calc(100% - 20px);
+      padding: 10px;
+      background-color: #4267b2;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 10px;
+      transition: background-color 0.3s;
+    }
+
+    button:hover {
+      background-color: #2a4e9d;
+    }
+
+    /* Dark Mode Styles */
+    body.dark-mode {
+      background-color: #1c1e21;
+      color: #fff;
+    }
+
+    .feed-section.dark-mode {
+      background-color: #36393f;
+    }
+
+    .feed-header.dark-mode {
+      border-bottom: 1px solid #555;
+    }
+
+    .actions.dark-mode {
+      border-top: 1px solid #555;
+    }
+
+    #create-form.dark-mode {
+      background-color: #36393f;
+      box-shadow: 0 0 10px rgba(255, 255, 255, 0.1);
+    }
+
+    label.dark-mode {
+      color: #fff;
+    }
+
+    input.dark-mode,
+    textarea.dark-mode,
+    button.dark-mode {
+      background-color: #2a2d31;
+      border: 1px solid #555;
+      color: #fff;
+    }
+
+    input.dark-mode::placeholder,
+    textarea.dark-mode::placeholder {
+      color: #ccc;
+    }
   </style>
 </head>
 <body>
@@ -83,11 +181,36 @@
     <i class="fab fa-facebook"></i> Feed Generator
   </header>
 
-  <main id="feed-list">
-    <!-- Feeds will be dynamically added here -->
+  <div id="dark-mode-toggle" onclick="toggleDarkMode()">
+    <i class="far fa-moon"></i>
+  </div>
+
+  <main>
+    <div id="create-form" class="dark-mode">
+      <label for="title" class="dark-mode">Title:</label>
+      <input type="text" id="title" name="title" placeholder="Enter feed title" class="dark-mode">
+
+      <label for="content" class="dark-mode">Content:</label>
+      <textarea id="content" name="content" placeholder="Enter feed content" class="dark-mode"></textarea>
+
+      <button type="button" onclick="createFeed()" class="dark-mode">Create Feed</button>
+    </div>
+
+    <div id="feed-list">
+      <!-- Feeds will be dynamically added here -->
+    </div>
   </main>
 
   <script>
+    // Function to toggle dark mode
+    function toggleDarkMode() {
+      document.body.classList.toggle('dark-mode');
+      const feedSections = document.querySelectorAll('.feed-section, #create-form label, #create-form input, #create-form textarea, #create-form button');
+      feedSections.forEach(section => {
+        section.classList.toggle('dark-mode');
+      });
+    }
+
     async function updateFeedList() {
       try {
         // Simulating data fetched from the server
@@ -101,11 +224,11 @@
 
         feeds.forEach(feed => {
           const feedSection = document.createElement('div');
-          feedSection.classList.add('feed-section');
+          feedSection.classList.add('feed-section', 'dark-mode');
 
           // Feed header
           const feedHeader = document.createElement('div');
-          feedHeader.classList.add('feed-header');
+          feedHeader.classList.add('feed-header', 'dark-mode');
           feedHeader.innerHTML = `
             <img class="user-avatar" src="${feed.user.avatar}" alt="${feed.user.name} Avatar">
             <div class="user-info">
@@ -117,13 +240,13 @@
 
           // Feed content
           const feedContent = document.createElement('div');
-          feedContent.classList.add('feed-content');
+          feedContent.classList.add('feed-content', 'dark-mode');
           feedContent.textContent = feed.content;
           feedSection.appendChild(feedContent);
 
           // Feed actions
           const actions = document.createElement('div');
-          actions.classList.add('actions');
+          actions.classList.add('actions', 'dark-mode');
           actions.innerHTML = `
             <i class="far fa-thumbs-up action-icon"></i>
             <i class="far fa-comment action-icon"></i>
@@ -136,6 +259,13 @@
       } catch (error) {
         console.error('Error fetching feeds:', error);
       }
+    }
+
+    function createFeed() {
+      // Logic to create a new feed
+      // You can add your implementation here
+      // After creating a new feed, call updateFeedList() to update the feed list
+      updateFeedList();
     }
 
     // Initial update of feed list on page load
