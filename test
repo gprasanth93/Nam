@@ -69,9 +69,13 @@
     .feed-section {
       border: 1px solid #ddd;
       border-radius: 8px;
-      padding: 1em;
       margin-bottom: 1em;
+      overflow: hidden;
       background-color: #f9f9f9;
+    }
+
+    .feed-content {
+      padding: 1em;
     }
 
     .feed-title {
@@ -107,11 +111,28 @@
     <h2>Recent Feeds</h2>
     <ul id="feed-list">
       <!-- Display feeds here -->
+      <li>
+        <div class="feed-section">
+          <div class="feed-content">
+            <h3 class="feed-title">Feed Title 1</h3>
+            <p class="feed-description">Feed Description 1</p>
+          </div>
+        </div>
+      </li>
+      <li>
+        <div class="feed-section">
+          <div class="feed-content">
+            <h3 class="feed-title">Feed Title 2</h3>
+            <p class="feed-description">Feed Description 2</p>
+          </div>
+        </div>
+      </li>
+      <!-- Add more feed items as needed -->
     </ul>
   </section>
 
   <script>
-    // JavaScript code for creating and updating feeds (as provided in the previous response)
+    // JavaScript code for creating and updating feeds (as provided in the previous responses)
   </script>
 </body>
 </html>
