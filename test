@@ -1,192 +1,79 @@
-Creating a full-fledged feed generator with frontend and backend involves several steps. Here's a simplified overview using Node.js, Express for the backend, PostgreSQL for the database, and a basic HTML frontend.
+// Import required modules
+const express = require('express');
+const { Pool } = require('pg');
+const Parser = require('rss-parser');
 
-1. **Set Up Your Project:**
-   - Initialize a new Node.js project: `npm init -y`
-   - Install necessary packages: `npm install express pg rss-parser`
-   - Set up a basic folder structure.
+// Set up Express app
+const app = express();
+const port = 3000;
 
-2. **Backend (Node.js + Express):**
-   - Create an `app.js` file.
-   - Initialize Express and set up basic routes.
-   - Connect to PostgreSQL using `pg` package. Ensure you have a PostgreSQL server running.
-   - Create a table in the database to store feed data.
+// Configure PostgreSQL connection
+const pool = new Pool({
+  user: 'your_username',
+  host: 'localhost',
+  database: 'your_database',
+  password: 'your_password',
+  port: 5432,
+});
 
-   ```javascript
-   const express = require('express');
-   const { Pool } = require('pg');
+// Use middleware to parse JSON in requests
+app.use(express.json());
 
-   const app = express();
-   const port = 3000;
+// Endpoint to get all feeds
+app.get('/feeds', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM feeds ORDER BY id DESC');
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error fetching feeds:', error);
+    res.status(500).send('Internal Server Error');
+  }
+});
 
-   const pool = new Pool({
-     user: 'your_username',
-     host: 'localhost',
-     database: 'your_database',
-     password: 'your_password',
-     port: 5432,
-   });
+// Endpoint to add a new feed
+app.post('/add-feed', async (req, res) => {
+  const { title, link, description } = req.body;
 
-   app.get('/feeds', (req, res) => {
-     // Implement logic to fetch feeds from the database
-   });
+  try {
+    const result = await pool.query('INSERT INTO feeds (title, link, description) VALUES ($1, $2, $3) RETURNING *', [title, link, description]);
 
-   app.post('/add-feed', (req, res) => {
-     // Implement logic to add a new feed to the database
-   });
+    const newFeed = result.rows[0];
+    res.status(201).json(newFeed);
+  } catch (error) {
+    console.error('Error adding feed:', error);
+    res.status(500).send('Internal Server Error');
+  }
+});
 
-   app.listen(port, () => {
-     console.log(`Server is running on http://localhost:${port}`);
-   });
-   ```
+// Endpoint to generate RSS feed
+app.get('/generate-rss', async (req, res) => {
+  try {
+    const feeds = await pool.query('SELECT * FROM feeds ORDER BY id DESC');
+    const items = feeds.rows.map(feed => ({
+      title: feed.title,
+      link: feed.link,
+      description: feed.description,
+    }));
 
-3. **Database (PostgreSQL):**
-   - Create a PostgreSQL database and a table to store feed data.
+    const feedData = {
+      title: 'Your Feed Title',
+      link: 'http://your-website.com',
+      description: 'Your feed description',
+      items,
+    };
 
-   ```sql
-   CREATE TABLE feeds (
-     id SERIAL PRIMARY KEY,
-     title VARCHAR(255),
-     link VARCHAR(255),
-     description TEXT
-   );
-   ```
+    const parser = new Parser();
+    const rss = await parser.parseURL(feedData);
 
-4. **RSS Feed Generation:**
-   - Use the `rss-parser` library to generate RSS feeds.
+    res.set('Content-Type', 'text/xml');
+    res.send(rss);
+  } catch (error) {
+    console.error('Error generating RSS feed:', error);
+    res.status(500).send('Internal Server Error');
+  }
+});
 
-   ```javascript
-   const Parser = require('rss-parser');
-   const parser = new Parser();
-
-   app.get('/generate-rss', async (req, res) => {
-     const feeds = await pool.query('SELECT * FROM feeds');
-     const items = feeds.rows.map((feed) => ({
-       title: feed.title,
-       link: feed.link,
-       description: feed.description,
-     }));
-
-     const feedData = {
-       title: 'Your Feed Title',
-       link: 'http://your-website.com',
-       description: 'Your feed description',
-       items,
-     };
-
-     const rss = await parser.parseURL(feedData);
-
-     res.set('Content-Type', 'text/xml');
-     res.send(rss);
-   });
-   ```
-
-5. **Frontend (HTML):**
-   - Create a simple HTML file to display the feeds.
-
-   ```html
-   <!DOCTYPE html>
-   <html lang="en">
-   <head>
-     <meta charset="UTF-8">
-     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-     <title>Feed Generator</title>
-   </head>
-   <body>
-     <h1>Feeds</h1>
-     <!-- Display feeds here -->
-   </body>
-   </html>
-   ```
-
-This is a basic outline, and you would need to add error handling, 
-validation, and potentially user authentication based on your requirements.
-To add a simple frontend with a "Create" section at the top and a display of recent feeds at the bottom, you can modify the HTML file and implement basic form handling using JavaScript. Here's an example:
-
-```html
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Feed Generator</title>
-</head>
-<body>
-  <h1>Create Feed</h1>
-  <form id="create-form">
-    <label for="title">Title:</label>
-    <input type="text" id="title" name="title" required>
-    <br>
-    <label for="link">Link:</label>
-    <input type="url" id="link" name="link" required>
-    <br>
-    <label for="description">Description:</label>
-    <textarea id="description" name="description" required></textarea>
-    <br>
-    <button type="button" onclick="createFeed()">Create Feed</button>
-  </form>
-
-  <h1>Recent Feeds</h1>
-  <ul id="feed-list">
-    <!-- Display feeds here -->
-  </ul>
-
-  <script>
-    async function createFeed() {
-      const title = document.getElementById('title').value;
-      const link = document.getElementById('link').value;
-      const description = document.getElementById('description').value;
-
-      try {
-        const response = await fetch('/add-feed', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ title, link, description }),
-        });
-
-        if (response.ok) {
-          alert('Feed created successfully!');
-          // Clear form fields
-          document.getElementById('create-form').reset();
-          // Fetch and update the feed list
-          updateFeedList();
-        } else {
-          alert('Failed to create feed.');
-        }
-      } catch (error) {
-        console.error('Error creating feed:', error);
-      }
-    }
-
-    async function updateFeedList() {
-      try {
-        const response = await fetch('/feeds');
-        const feeds = await response.json();
-
-        const feedList = document.getElementById('feed-list');
-        // Clear previous entries
-        feedList.innerHTML = '';
-
-        feeds.forEach(feed => {
-          const listItem = document.createElement('li');
-          listItem.innerHTML = `<strong>${feed.title}</strong>: ${feed.description}`;
-          feedList.appendChild(listItem);
-        });
-      } catch (error) {
-        console.error('Error fetching feeds:', error);
-      }
-    }
-
-    // Initial update of feed list on page load
-    updateFeedList();
-  </script>
-</body>
-</html>
-```
-
-In this example, the form at the top allows users to input feed details, and the "Create Feed" button triggers the `createFeed` function. This function uses the Fetch API to send a POST request to the `/add-feed` endpoint on the server.
-
-The recent feeds section at the bottom is updated using the `updateFeedList` function, which fetches feed data from the server using the `/feeds` endpoint. The retrieved feeds are then displayed in an unordered list (`ul`). The feed list is updated both after creating a new feed and on the initial page load.
-
-Remember to adapt this code to fit your specific server-side implementation and adjust it based on your project's requirements and structure.
+// Start the server
+app.listen(port, () => {
+  console.log(`Server is running on http://localhost:${port}`);
+});
