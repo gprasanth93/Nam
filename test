@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Professional Feed UI</title>
+  <title>Feed Generator</title>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
   <style>
     body {
@@ -80,13 +80,11 @@
 </head>
 <body>
   <header>
-    <i class="fab fa-facebook"></i> Facebook
+    <i class="fab fa-facebook"></i> Feed Generator
   </header>
 
-  <main>
-    <div id="feed-list">
-      <!-- Feeds will be dynamically added here -->
-    </div>
+  <main id="feed-list">
+    <!-- Feeds will be dynamically added here -->
   </main>
 
   <script>
@@ -94,7 +92,7 @@
       try {
         // Simulating data fetched from the server
         const feeds = [
-          { user: { name: 'John Doe', avatar: 'https://placekitten.com/40/40' }, content: 'This is a sample post content.', date: '2 hours ago' },
+          { user: { name: 'John Doe', avatar: 'https://placekitten.com/40/40' }, content: 'This is a sample feed content.', date: '2 hours ago' },
           // Add more feed items as needed
         ];
 
