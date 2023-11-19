@@ -110,29 +110,67 @@
 
     <h2>Recent Feeds</h2>
     <ul id="feed-list">
-      <!-- Display feeds here -->
-      <li>
-        <div class="feed-section">
-          <div class="feed-content">
-            <h3 class="feed-title">Feed Title 1</h3>
-            <p class="feed-description">Feed Description 1</p>
-          </div>
-        </div>
-      </li>
-      <li>
-        <div class="feed-section">
-          <div class="feed-content">
-            <h3 class="feed-title">Feed Title 2</h3>
-            <p class="feed-description">Feed Description 2</p>
-          </div>
-        </div>
-      </li>
-      <!-- Add more feed items as needed -->
+      <!-- Feed items will be dynamically added here -->
     </ul>
   </section>
 
   <script>
-    // JavaScript code for creating and updating feeds (as provided in the previous responses)
+    async function updateFeedList() {
+      try {
+        const response = await fetch('/feeds');
+        const feeds = await response.json();
+
+        const feedList = document.getElementById('feed-list');
+        feedList.innerHTML = ''; // Clear previous entries
+
+        feeds.forEach(feed => {
+          const listItem = document.createElement('li');
+          listItem.innerHTML = `
+            <div class="feed-section">
+              <div class="feed-content">
+                <h3 class="feed-title">${feed.title}</h3>
+                <p class="feed-description">${feed.description}</p>
+              </div>
+            </div>
+          `;
+          feedList.appendChild(listItem);
+        });
+      } catch (error) {
+        console.error('Error fetching feeds:', error);
+      }
+    }
+
+    // Function to create a new feed
+    async function createFeed() {
+      const title = document.getElementById('title').value;
+      const link = document.getElementById('link').value;
+      const description = document.getElementById('description').value;
+
+      try {
+        const response = await fetch('/add-feed', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ title, link, description }),
+        });
+
+        if (response.ok) {
+          alert('Feed created successfully!');
+          // Clear form fields
+          document.getElementById('create-form').reset();
+          // Fetch and update the feed list
+          updateFeedList();
+        } else {
+          alert('Failed to create feed.');
+        }
+      } catch (error) {
+        console.error('Error creating feed:', error);
+      }
+    }
+
+    // Initial update of feed list on page load
+    updateFeedList();
   </script>
 </body>
 </html>
