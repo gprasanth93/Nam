@@ -3,169 +3,140 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Feed Generator</title>
+  <title>Professional Feed UI</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
   <style>
     body {
       font-family: 'Arial', sans-serif;
       margin: 0;
       padding: 0;
-      background-color: #f4f4f4;
+      background-color: #f0f2f5;
     }
 
     header {
-      background-color: #333;
+      background-color: #4267b2;
       color: white;
       padding: 1em;
       text-align: center;
+      font-size: 1.5em;
     }
 
-    section {
-      max-width: 800px;
-      margin: 2em auto;
-      padding: 1em;
-      background-color: white;
-      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-      border-radius: 8px;
-    }
-
-    form {
+    main {
       display: flex;
-      flex-direction: column;
-      gap: 1em;
-    }
-
-    label {
-      font-weight: bold;
-    }
-
-    input, textarea {
-      width: 100%;
-      padding: 0.5em;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      box-sizing: border-box;
-    }
-
-    button {
-      width: 100%;
-      padding: 0.7em;
-      background-color: #333;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-    }
-
-    button:hover {
-      background-color: #555;
-    }
-
-    ul {
-      list-style-type: none;
-      padding: 0;
-      margin: 0;
+      justify-content: center;
+      align-items: flex-start;
+      margin: 20px auto;
+      max-width: 800px;
     }
 
     .feed-section {
-      border: 1px solid #ddd;
+      background-color: white;
+      width: 100%;
+      margin-bottom: 20px;
       border-radius: 8px;
-      margin-bottom: 1em;
-      overflow: hidden;
-      background-color: #f9f9f9;
+      box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+    }
+
+    .feed-header {
+      padding: 15px;
+      display: flex;
+      align-items: center;
+      border-bottom: 1px solid #ddd;
+    }
+
+    .user-avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      margin-right: 10px;
+    }
+
+    .user-info {
+      flex: 1;
     }
 
     .feed-content {
-      padding: 1em;
+      padding: 15px;
+      line-height: 1.6;
     }
 
-    .feed-title {
-      font-size: 1.2em;
-      margin-bottom: 0.5em;
+    .actions {
+      padding: 15px;
+      border-top: 1px solid #ddd;
+      display: flex;
+      align-items: center;
     }
 
-    .feed-description {
-      color: #555;
+    .action-icon {
+      margin-right: 10px;
+      color: #606770;
+      cursor: pointer;
+    }
+
+    .action-icon:hover {
+      color: #1877f2;
     }
   </style>
 </head>
 <body>
   <header>
-    <h1>Feed Generator</h1>
+    <i class="fab fa-facebook"></i> Facebook
   </header>
 
-  <section>
-    <h2>Create Feed</h2>
-    <form id="create-form">
-      <label for="title">Title:</label>
-      <input type="text" id="title" name="title" required>
-
-      <label for="link">Link:</label>
-      <input type="url" id="link" name="link" required>
-
-      <label for="description">Description:</label>
-      <textarea id="description" name="description" required></textarea>
-
-      <button type="button" onclick="createFeed()">Create Feed</button>
-    </form>
-
-    <h2>Recent Feeds</h2>
-    <ul id="feed-list">
-      <!-- Feed items will be dynamically added here -->
-    </ul>
-  </section>
+  <main>
+    <div id="feed-list">
+      <!-- Feeds will be dynamically added here -->
+    </div>
+  </main>
 
   <script>
     async function updateFeedList() {
       try {
-        const response = await fetch('/feeds');
-        const feeds = await response.json();
+        // Simulating data fetched from the server
+        const feeds = [
+          { user: { name: 'John Doe', avatar: 'https://placekitten.com/40/40' }, content: 'This is a sample post content.', date: '2 hours ago' },
+          // Add more feed items as needed
+        ];
 
         const feedList = document.getElementById('feed-list');
-        feedList.innerHTML = ''; // Clear previous entries
+        feedList.innerHTML = '';
 
         feeds.forEach(feed => {
-          const listItem = document.createElement('li');
-          listItem.innerHTML = `
-            <div class="feed-section">
-              <div class="feed-content">
-                <h3 class="feed-title">${feed.title}</h3>
-                <p class="feed-description">${feed.description}</p>
-              </div>
+          const feedSection = document.createElement('div');
+          feedSection.classList.add('feed-section');
+
+          // Feed header
+          const feedHeader = document.createElement('div');
+          feedHeader.classList.add('feed-header');
+          feedHeader.innerHTML = `
+            <img class="user-avatar" src="${feed.user.avatar}" alt="${feed.user.name} Avatar">
+            <div class="user-info">
+              <strong>${feed.user.name}</strong>
+              <span>${feed.date}</span>
             </div>
           `;
-          feedList.appendChild(listItem);
+          feedSection.appendChild(feedHeader);
+
+          // Feed content
+          const feedContent = document.createElement('div');
+          feedContent.classList.add('feed-content');
+          feedContent.textContent = feed.content;
+          feedSection.appendChild(feedContent);
+
+          // Feed actions
+          const actions = document.createElement('div');
+          actions.classList.add('actions');
+          actions.innerHTML = `
+            <i class="far fa-thumbs-up action-icon"></i>
+            <i class="far fa-comment action-icon"></i>
+            <i class="fas fa-share action-icon"></i>
+          `;
+          feedSection.appendChild(actions);
+
+          feedList.appendChild(feedSection);
         });
       } catch (error) {
         console.error('Error fetching feeds:', error);
-      }
-    }
-
-    // Function to create a new feed
-    async function createFeed() {
-      const title = document.getElementById('title').value;
-      const link = document.getElementById('link').value;
-      const description = document.getElementById('description').value;
-
-      try {
-        const response = await fetch('/add-feed', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ title, link, description }),
-        });
-
-        if (response.ok) {
-          alert('Feed created successfully!');
-          // Clear form fields
-          document.getElementById('create-form').reset();
-          // Fetch and update the feed list
-          updateFeedList();
-        } else {
-          alert('Failed to create feed.');
-        }
-      } catch (error) {
-        console.error('Error creating feed:', error);
       }
     }
 
