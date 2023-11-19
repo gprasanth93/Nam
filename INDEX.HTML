@@ -10,8 +10,16 @@
       font-family: 'Arial', sans-serif;
       margin: 0;
       padding: 0;
-      background-color: #f0f2f5;
       transition: background-color 0.3s;
+      background-color: white; /* Default background color */
+      color: #333; /* Default text color */
+    }
+
+    @media (prefers-color-scheme: dark) {
+      body {
+        background-color: #1c1e21; /* Dark mode background color */
+        color: #fff; /* Dark mode text color */
+      }
     }
 
     header {
@@ -273,3 +281,6 @@
   </script>
 </body>
 </html>
+
+
+This example includes a form to create a new feed, and each feed is displayed in a rectangular section with user information, content, and action icons. The dark mode toggle button allows users to switch between light and dark modes. The default mode is based on the system settings. Customize the content, styling, and icons as needed for your specific design preferences.
