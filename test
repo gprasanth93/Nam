@@ -1,39 +1,33 @@
-SELECT
-    table_name,
-    column_name,
-    ordinal_position AS column_position,
-    data_type,
-    character_maximum_length AS max_length,
-    numeric_precision AS numeric_precision,
-    is_nullable,
-    column_default,
-    pg_stats.most_common_vals AS most_common_values,
-    pg_stats.most_common_freqs AS most_common_freqs,
-    pg_stats.histogram_bounds AS histogram_bounds,
-    pg_stats.histogram_bounds[1] AS min_value,
-    pg_stats.histogram_bounds[array_length(pg_stats.histogram_bounds, 1)] AS max_value,
-    coalesce(pg_stats.null_frac, 0) AS null_fraction,
-    coalesce(pg_stats.avg_width, 0) AS avg_width,
-    pg_stats.n_distinct,
-    pg_stats.n_live_tup AS rows_estimate,
-    pg_stats.n_dead_tup AS rows_changed,
-    pg_stats.last_analyze AS last_analyze,
-    pg_stats.last_autoanalyze AS last_autoanalyze,
-    pg_stats.last_vacuum AS last_vacuum,
-    pg_stats.last_autovacuum AS last_autovacuum,
-    pg_stats.last_autovacuum_stats AS last_autovacuum_stats,
-    pg_stats.last_vacuum_stats AS last_vacuum_stats,
-    pg_stats.n_mod_since_analyze AS rows_changed_since_analyze,
-    pg_stats.n_mod_since_analyze / (CASE WHEN pg_stats.n_live_tup > 0 THEN pg_stats.n_live_tup ELSE 1 END)::float AS percent_rows_changed,
-    pg_stats.n_live_tup / (CASE WHEN pg_stats.n_distinct > 0 THEN pg_stats.n_distinct ELSE 1 END)::float AS rows_per_distinct_value,
-    pg_stats.histogram_bounds IS NOT NULL AS has_histogram
-FROM
-    information_schema.columns
-JOIN
-    pg_stats ON (
-        pg_stats.schemaname = table_schema
-        AND pg_stats.tablename = table_name
-        AND pg_stats.attname = column_name
-    )
-WHERE
-    table_name = 'your_table_name';
+const net = require('net');
+
+function findFreePortInRange(startPort, endPort, callback) {
+    const server = net.createServer();
+
+    server.on('error', (err) => {
+        if (err.code === 'EADDRINUSE') {
+            findFreePortInRange(startPort + 1, endPort, callback);
+        } else {
+            callback(err);
+        }
+    });
+
+    server.on('listening', () => {
+        const port = server.address().port;
+        server.close(() => {
+            callback(null, port);
+        });
+    });
+
+    server.listen(startPort, '127.0.0.1');
+}
+
+const startPort = 3000; // Specify your start port
+const endPort = 4000;   // Specify your end port
+
+findFreePortInRange(startPort, endPort, (error, port) => {
+    if (error) {
+        console.error(error);
+    } else {
+        console.log(`Free port found: ${port}`);
+    }
+});
