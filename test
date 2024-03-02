@@ -1,33 +1,27 @@
-const net = require('net');
 
-function findFreePortInRange(startPort, endPort, callback) {
-    const server = net.createServer();
 
-    server.on('error', (err) => {
-        if (err.code === 'EADDRINUSE') {
-            findFreePortInRange(startPort + 1, endPort, callback);
-        } else {
-            callback(err);
+const extractIPs = (obj) => {
+  const ips = [];
+
+  Object.values(obj).forEach(item => {
+    if (item.connectors) {
+      item.connectors.forEach(connector => {
+        if (connector.ip) {
+          ips.push(connector.ip);
         }
-    });
-
-    server.on('listening', () => {
-        const port = server.address().port;
-        server.close(() => {
-            callback(null, port);
-        });
-    });
-
-    server.listen(startPort, '127.0.0.1');
-}
-
-const startPort = 3000; // Specify your start port
-const endPort = 4000;   // Specify your end port
-
-findFreePortInRange(startPort, endPort, (error, port) => {
-    if (error) {
-        console.error(error);
-    } else {
-        console.log(`Free port found: ${port}`);
+        if (connector.connections) {
+          connector.connections.forEach(connection => {
+            if (connection.ip) {
+              ips.push(connection.ip);
+            }
+          });
+        }
+      });
     }
-});
+  });
+
+  return ips;
+};
+
+const allIPs = extractIPs(data);
+console.log(allIPs);
