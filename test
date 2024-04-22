@@ -1,26 +1,34 @@
-const http = require('http');
+const fetch = require('node-fetch');
 
-const server = http.createServer((req, res) => {
-  // Set headers for SSE
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    'Connection': 'keep-alive'
-  });
+const SERVER_URL = 'http://localhost:3000/events';
 
-  // Send data at regular intervals
-  const intervalId = setInterval(() => {
-    const data = `data: ${new Date().toISOString()}\n\n`;
-    res.write(data);
-  }, 1000);
+// Function to connect to SSE server and listen for events
+async function listenToEvents() {
+  const eventSource = new EventSource(SERVER_URL);
 
-  // Clean up on client disconnect
-  req.on('close', () => {
-    clearInterval(intervalId);
-  });
-});
+  eventSource.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    console.log(data.time);
+  };
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+  eventSource.onerror = (error) => {
+    console.error('EventSource failed:', error);
+  };
+}
+
+// Start listening to events
+listenToEvents();
+
+// Example of making other API calls to the server
+async function fetchDataFromServer() {
+  try {
+    const response = await fetch('http://localhost:3000/api/data');
+    const data = await response.json();
+    console.log('Data from server:', data);
+  } catch (error) {
+    console.error('Error fetching data:', error.message);
+  }
+}
+
+// Call the function to fetch data from the server
+fetchDataFromServer();
