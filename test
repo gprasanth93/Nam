@@ -1,34 +1,19 @@
-const fetch = require('node-fetch');
+const express = require('express');
+const SSE = require('express-sse');
 
-const SERVER_URL = 'http://localhost:3000/events';
+const app = express();
+const sse = new SSE();
 
-// Function to connect to SSE server and listen for events
-async function listenToEvents() {
-  const eventSource = new EventSource(SERVER_URL);
+// Route to stream data
+app.get('/events', sse.init);
 
-  eventSource.onmessage = (event) => {
-    const data = JSON.parse(event.data);
-    console.log(data.time);
-  };
+// Send data at regular intervals
+setInterval(() => {
+  const data = { time: new Date().toISOString() };
+  sse.send(data);
+}, 1000);
 
-  eventSource.onerror = (error) => {
-    console.error('EventSource failed:', error);
-  };
-}
-
-// Start listening to events
-listenToEvents();
-
-// Example of making other API calls to the server
-async function fetchDataFromServer() {
-  try {
-    const response = await fetch('http://localhost:3000/api/data');
-    const data = await response.json();
-    console.log('Data from server:', data);
-  } catch (error) {
-    console.error('Error fetching data:', error.message);
-  }
-}
-
-// Call the function to fetch data from the server
-fetchDataFromServer();
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
