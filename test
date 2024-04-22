@@ -1,27 +1,26 @@
+const http = require('http');
 
-
-const extractIPs = (obj) => {
-  const ips = [];
-
-  Object.values(obj).forEach(item => {
-    if (item.connectors) {
-      item.connectors.forEach(connector => {
-        if (connector.ip) {
-          ips.push(connector.ip);
-        }
-        if (connector.connections) {
-          connector.connections.forEach(connection => {
-            if (connection.ip) {
-              ips.push(connection.ip);
-            }
-          });
-        }
-      });
-    }
+const server = http.createServer((req, res) => {
+  // Set headers for SSE
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    'Connection': 'keep-alive'
   });
 
-  return ips;
-};
+  // Send data at regular intervals
+  const intervalId = setInterval(() => {
+    const data = `data: ${new Date().toISOString()}\n\n`;
+    res.write(data);
+  }, 1000);
 
-const allIPs = extractIPs(data);
-console.log(allIPs);
+  // Clean up on client disconnect
+  req.on('close', () => {
+    clearInterval(intervalId);
+  });
+});
+
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
