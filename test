@@ -1,19 +1,17 @@
-const express = require('express');
-const SSE = require('express-sse');
+function convertEpochToFormattedDate(epoch) {
+  const date = new Date(epoch);
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, '0');
+  const dd = String(date.getDate()).padStart(2, '0');
+  const hh = String(date.getHours()).padStart(2, '0');
+  const min = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  const sss = String(date.getMilliseconds()).padStart(3, '0');
 
-const app = express();
-const sse = new SSE();
+  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}.${sss}`;
+}
 
-// Route to stream data
-app.get('/events', sse.init);
-
-// Send data at regular intervals
-setInterval(() => {
-  const data = { time: new Date().toISOString() };
-  sse.send(data);
-}, 1000);
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// Example usage:
+const epochTime = 1625140800000; // Replace with your epoch time
+const formattedDate = convertEpochToFormattedDate(epochTime);
+console.log(formattedDate);
