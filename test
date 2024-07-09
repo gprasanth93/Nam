@@ -1,17 +1,52 @@
-function convertEpochToFormattedDate(epoch) {
-  const date = new Date(epoch);
-  const yyyy = date.getFullYear();
-  const mm = String(date.getMonth() + 1).padStart(2, '0');
-  const dd = String(date.getDate()).padStart(2, '0');
-  const hh = String(date.getHours()).padStart(2, '0');
-  const min = String(date.getMinutes()).padStart(2, '0');
-  const ss = String(date.getSeconds()).padStart(2, '0');
-  const sss = String(date.getMilliseconds()).padStart(3, '0');
+const Transport = require('winston-transport');
+const fetch = require('node-fetch');
 
-  return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}.${sss}`;
+class HttpTransportWithQueue extends Transport {
+  constructor(opts) {
+    super(opts);
+    this.url = opts.url;
+    this.queue = [];
+    this.isSending = false;
+  }
+
+  log(info, callback) {
+    setImmediate(() => {
+      this.emit('logged', info);
+    });
+
+    this.queue.push(info);
+    this.processQueue();
+
+    callback();
+  }
+
+  async processQueue() {
+    if (this.isSending || this.queue.length === 0) {
+      return;
+    }
+
+    this.isSending = true;
+    while (this.queue.length > 0) {
+      const log = this.queue[0];
+      try {
+        const response = await fetch(this.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(log),
+        });
+        if (response.ok) {
+          this.queue.shift(); // Remove log from queue if successfully sent
+        } else {
+          console.error('Failed to send log, status:', response.status);
+          break; // Exit loop to retry later
+        }
+      } catch (error) {
+        console.error('Error sending log:', error);
+        break; // Exit loop to retry later
+      }
+    }
+    this.isSending = false;
+  }
 }
 
-// Example usage:
-const epochTime = 1625140800000; // Replace with your epoch time
-const formattedDate = convertEpochToFormattedDate(epochTime);
-console.log(formattedDate);
+module.exports = HttpTransportWithQueue;
