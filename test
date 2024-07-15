@@ -1,52 +1,25 @@
-const Transport = require('winston-transport');
-const fetch = require('node-fetch');
-
-class HttpTransportWithQueue extends Transport {
-  constructor(opts) {
-    super(opts);
-    this.url = opts.url;
-    this.queue = [];
-    this.isSending = false;
-  }
-
-  log(info, callback) {
-    setImmediate(() => {
-      this.emit('logged', info);
-    });
-
-    this.queue.push(info);
-    this.processQueue();
-
-    callback();
-  }
-
-  async processQueue() {
-    if (this.isSending || this.queue.length === 0) {
-      return;
-    }
-
-    this.isSending = true;
-    while (this.queue.length > 0) {
-      const log = this.queue[0];
-      try {
-        const response = await fetch(this.url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(log),
-        });
-        if (response.ok) {
-          this.queue.shift(); // Remove log from queue if successfully sent
-        } else {
-          console.error('Failed to send log, status:', response.status);
-          break; // Exit loop to retry later
-        }
-      } catch (error) {
-        console.error('Error sending log:', error);
-        break; // Exit loop to retry later
-      }
-    }
-    this.isSending = false;
-  }
-}
-
-module.exports = HttpTransportWithQueue;
+CREATE OR REPLACE FUNCTION walfile_to_lsn(wal_file text)
+RETURNS text AS $$
+DECLARE
+    log_file_hex text;
+    segment_hex text;
+    log_file_dec int;
+    segment_dec int;
+    lsn text;
+BEGIN
+    -- Extract the log file number part
+    log_file_hex := substring(wal_file from 9 for 8);
+    
+    -- Extract the segment number part
+    segment_hex := substring(wal_file from 17 for 8);
+    
+    -- Convert hexadecimal to decimal
+    log_file_dec := ('x' || log_file_hex)::bit(32)::int;
+    segment_dec := ('x' || segment_hex)::bit(32)::int;
+    
+    -- Combine log file number and segment number to form LSN
+    lsn := log_file_dec::text || '/' || segment_dec::text;
+    
+    RETURN lsn;
+END;
+$$ LANGUAGE plpgsql;
