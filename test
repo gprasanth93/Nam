@@ -1,89 +1,96 @@
 const express = require('express');
 const { Pool } = require('pg');
-const { EventEmitter } = require('events');
-
 const app = express();
-const port = 3000;
+const PORT = 3000;
 
 const pool = new Pool({
-  user: 'your_db_user',
-  host: 'your_db_host',
-  database: 'your_db_name',
-  password: 'your_db_password',
-  port: 5432, // default PostgreSQL port
+    user: 'your_user',
+    host: 'your_host',
+    database: 'your_database',
+    password: 'your_password',
+    port: 5432,
 });
 
-const eventEmitter = new EventEmitter();
-const eventMap = {};
+app.get('/sse/:stream', (req, res) => {
+    const stream = req.params.stream;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
 
-// Connect to the PostgreSQL database
-pool.connect((err, client, release) => {
-  if (err) {
-    console.error('Error acquiring client', err.stack);
-    return;
-  }
-  client.on('notification', (msg) => {
-    const payload = JSON.parse(msg.payload);
-    if (eventMap[payload.hostname]) {
-      eventEmitter.emit(payload.hostname, payload);
-    }
-  });
-  client.query('LISTEN new_insert');
-  release();
+    const sendEvent = (data) => {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    pool.connect((err, client, release) => {
+        if (err) {
+            console.error('Error acquiring client', err.stack);
+            return;
+        }
+        client.query(`LISTEN ${stream}`);
+        client.on('notification', (msg) => {
+            if (msg.channel === stream) {
+                sendEvent(JSON.parse(msg.payload));
+            }
+        });
+
+        const endStream = () => {
+            client.query(`UNLISTEN ${stream}`);
+            client.removeListener('notification', sendEvent);
+            release();
+            res.end();
+        };
+
+        // End the SSE stream after 5 minutes
+        const timeout = setTimeout(endStream, 300000);
+
+        req.on('close', () => {
+            clearTimeout(timeout);
+            endStream();
+        });
+    });
 });
 
-// Middleware to handle SSE connections
-app.get('/stream/:hostname', (req, res) => {
-  const hostname = req.params.hostname;
-  
-  if (!['HRX', 'HTX', 'GBC'].includes(hostname)) {
-    return res.status(400).send('Invalid hostname');
-  }
-
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-
-  const onData = (data) => {
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
-  };
-
-  eventEmitter.on(hostname, onData);
-
-  // Stop the SSE stream after 5 minutes
-  const timeout = setTimeout(() => {
-    eventEmitter.removeListener(hostname, onData);
-    res.end();
-  }, 5 * 60 * 1000);
-
-  req.on('close', () => {
-    clearTimeout(timeout);
-    eventEmitter.removeListener(hostname, onData);
-    res.end();
-  });
-});
-
-app.listen(port, () => {
-  console.log(`Server running at http://localhost:${port}/`);
+app.listen(PORT, () => {
+    console.log(`Server is running on http://localhost:${PORT}`);
 });
 
 
-
-CREATE OR REPLACE FUNCTION notify_new_insert() RETURNS TRIGGER AS $$
-DECLARE
-  payload JSON;
+CREATE OR REPLACE FUNCTION notify_dynamic_insert()
+RETURNS trigger AS $$
 BEGIN
-  payload = json_build_object(
-    'id', NEW.id,
-    'hostname', NEW.hostname,
-    'data', NEW.data
-  );
-  PERFORM pg_notify('new_insert', payload::text);
-  RETURN NEW;
+    PERFORM pg_notify(NEW.broadcast_stream, row_to_json(NEW)::text);
+    RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER new_insert_trigger
+CREATE TRIGGER dynamic_insert_trigger
 AFTER INSERT ON your_table
 FOR EACH ROW
-EXECUTE PROCEDURE notify_new_insert();
+EXECUTE FUNCTION notify_dynamic_insert();
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Dynamic SSE Test</title>
+</head>
+<body>
+    <h1>Dynamic SSE Stream</h1>
+    <div id="sse-data"></div>
+
+    <script>
+        const streamName = 'suntv';  // Change this dynamically as needed
+        const eventSource = new EventSource(`http://localhost:3000/sse/${streamName}`);
+
+        eventSource.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            document.getElementById('sse-data').innerHTML += `<p>${data.message}</p>`;
+        };
+
+        eventSource.onerror = function() {
+            console.error('Error occurred while receiving server-sent event.');
+        };
+    </script>
+</body>
+</html>
