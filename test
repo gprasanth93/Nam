@@ -1,96 +1,76 @@
-const express = require('express');
-const { Pool } = require('pg');
-const app = express();
-const PORT = 3000;
+document.addEventListener('DOMContentLoaded', () => {
+    const consoleElement = document.getElementById('console');
+    const hostnameColors = {};
+    const colorPalette = ['cyan', 'magenta', 'yellow', 'orange', 'lightgreen', 'lightblue', 'violet'];
 
-const pool = new Pool({
-    user: 'your_user',
-    host: 'your_host',
-    database: 'your_database',
-    password: 'your_password',
-    port: 5432,
-});
+    function getRandomColor() {
+        return colorPalette[Math.floor(Math.random() * colorPalette.length)];
+    }
 
-app.get('/sse/:stream', (req, res) => {
-    const stream = req.params.stream;
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
+    function createConsoleItem(item) {
+        if (!hostnameColors[item.hostname]) {
+            hostnameColors[item.hostname] = getRandomColor();
+        }
 
-    const sendEvent = (data) => {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
+        const itemElement = document.createElement('div');
+        itemElement.classList.add('console-item', `color-${item.level}`);
+
+        const timestampElement = document.createElement('span');
+        timestampElement.textContent = `${item.timestamp} `;
+
+        const hostnameElement = document.createElement('span');
+        hostnameElement.style.color = hostnameColors[item.hostname];
+        hostnameElement.textContent = `[${item.hostname}] `;
+
+        const messageElement = document.createElement('span');
+        messageElement.textContent = `${item.label.toUpperCase()}: ${item.message}`;
+
+        itemElement.appendChild(timestampElement);
+        itemElement.appendChild(hostnameElement);
+        itemElement.appendChild(messageElement);
+
+        return itemElement;
+    }
+
+    function fetchAndDisplayData() {
+        fetch('/api/logs')  // Replace with your actual API endpoint
+            .then(response => response.json())
+            .then(data => {
+                consoleElement.innerHTML = '';  // Clear previous data
+
+                // Sort the data based on timestamp
+                data.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+                data.forEach(item => {
+                    const itemElement = createConsoleItem(item);
+                    consoleElement.appendChild(itemElement);
+                });
+
+                // Scroll to bottom
+                consoleElement.scrollTop = consoleElement.scrollHeight;
+            })
+            .catch(error => console.error('Error fetching data:', error));
+    }
+
+    // Fetch data initially
+    fetchAndDisplayData();
+
+    // Connect to SSE stream
+    const eventSource = new EventSource('/api/logs/stream');  // Replace with your SSE endpoint
+
+    eventSource.onmessage = (event) => {
+        const newItem = JSON.parse(event.data);
+        const itemElement = createConsoleItem(newItem);
+
+        const shouldScroll = consoleElement.scrollTop + consoleElement.clientHeight === consoleElement.scrollHeight;
+        consoleElement.appendChild(itemElement);
+
+        if (shouldScroll) {
+            consoleElement.scrollTop = consoleElement.scrollHeight;
+        }
     };
 
-    pool.connect((err, client, release) => {
-        if (err) {
-            console.error('Error acquiring client', err.stack);
-            return;
-        }
-        client.query(`LISTEN ${stream}`);
-        client.on('notification', (msg) => {
-            if (msg.channel === stream) {
-                sendEvent(JSON.parse(msg.payload));
-            }
-        });
-
-        const endStream = () => {
-            client.query(`UNLISTEN ${stream}`);
-            client.removeListener('notification', sendEvent);
-            release();
-            res.end();
-        };
-
-        // End the SSE stream after 5 minutes
-        const timeout = setTimeout(endStream, 300000);
-
-        req.on('close', () => {
-            clearTimeout(timeout);
-            endStream();
-        });
-    });
+    eventSource.onerror = (error) => {
+        console.error('Error with SSE connection:', error);
+    };
 });
-
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
-
-
-CREATE OR REPLACE FUNCTION notify_dynamic_insert()
-RETURNS trigger AS $$
-BEGIN
-    PERFORM pg_notify(NEW.broadcast_stream, row_to_json(NEW)::text);
-    RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-CREATE TRIGGER dynamic_insert_trigger
-AFTER INSERT ON your_table
-FOR EACH ROW
-EXECUTE FUNCTION notify_dynamic_insert();
-
-
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Dynamic SSE Test</title>
-</head>
-<body>
-    <h1>Dynamic SSE Stream</h1>
-    <div id="sse-data"></div>
-
-    <script>
-        const streamName = 'suntv';  // Change this dynamically as needed
-        const eventSource = new EventSource(`http://localhost:3000/sse/${streamName}`);
-
-        eventSource.onmessage = function(event) {
-            const data = JSON.parse(event.data);
-            document.getElementById('sse-data').innerHTML += `<p>${data.message}</p>`;
-        };
-
-        eventSource.onerror = function() {
-            console.error('Error occurred while receiving server-sent event.');
-        };
-    </script>
-</body>
-</html>
