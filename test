@@ -1,1 +1,96 @@
- const colorPalette = ['#00FFFF', '#FF00FF', '#FFFF00', '#FFA500', '#90EE90', '#ADD8E6', '#EE82EE'];
+document.addEventListener('DOMContentLoaded', () => {
+    const consoleElement = document.getElementById('console');
+    const hostnameColors = {};
+    const colorPalette = ['#00FFFF', '#FF00FF', '#FFFF00', '#FFA500', '#90EE90', '#ADD8E6', '#EE82EE'];
+    let queue = [];
+    let isProcessingQueue = false;
+
+    function getRandomColor() {
+        return colorPalette[Math.floor(Math.random() * colorPalette.length)];
+    }
+
+    function createConsoleItem(item) {
+        if (!hostnameColors[item.hostname]) {
+            hostnameColors[item.hostname] = getRandomColor();
+        }
+
+        const itemElement = document.createElement('div');
+        itemElement.classList.add('console-item', `color-${item.level}`);
+
+        const timestampElement = document.createElement('span');
+        timestampElement.textContent = `${item.timestamp} `;
+
+        const hostnameElement = document.createElement('span');
+        hostnameElement.style.color = hostnameColors[item.hostname];
+        hostnameElement.textContent = `[${item.hostname}] `;
+
+        const messageElement = document.createElement('span');
+        messageElement.textContent = `${item.label.toUpperCase()}: ${item.message}`;
+
+        itemElement.appendChild(timestampElement);
+        itemElement.appendChild(hostnameElement);
+        itemElement.appendChild(messageElement);
+
+        return itemElement;
+    }
+
+    function appendLogItem(item) {
+        const itemElement = createConsoleItem(item);
+        const isAtBottom = consoleElement.scrollTop + consoleElement.clientHeight >= consoleElement.scrollHeight - 1;
+
+        consoleElement.appendChild(itemElement);
+
+        if (isAtBottom) {
+            consoleElement.scrollTop = consoleElement.scrollHeight;
+        }
+    }
+
+    function processQueue() {
+        if (queue.length > 0 && !isProcessingQueue) {
+            isProcessingQueue = true;
+            const item = queue.shift();
+            appendLogItem(item);
+
+            setTimeout(() => {
+                isProcessingQueue = false;
+                processQueue();
+            }, 1000);  // 1 second delay
+        }
+    }
+
+    function fetchAndDisplayData() {
+        fetch('/api/logs')  // Replace with your actual API endpoint
+            .then(response => response.json())
+            .then(data => {
+                // Clear the previous queue and console
+                queue = [];
+                consoleElement.innerHTML = '';
+
+                // Sort the data based on timestamp
+                data.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+                data.forEach(item => {
+                    queue.push(item);
+                });
+
+                processQueue();
+            })
+            .catch(error => console.error('Error fetching data:', error));
+    }
+
+    // Fetch data initially
+    fetchAndDisplayData();
+
+    // Connect to SSE stream
+    const eventSource = new EventSource('/api/logs/stream');  // Replace with your SSE endpoint
+
+    eventSource.onmessage = (event) => {
+        const newItem = JSON.parse(event.data);
+        queue.push(newItem);
+        processQueue();
+    };
+
+    eventSource.onerror = (error) => {
+        console.error('Error with SSE connection:', error);
+    };
+});
