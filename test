@@ -1,179 +1,36 @@
-import React, { useEffect, useRef, useState } from 'react';
-import './App.css';
+const express = require('express');
+const proxy = require('express-http-proxy');
 
-interface LogItem {
-  timestamp: string;
-  level: 'info' | 'warn' | 'error';
-  hostname: string;
-  label: string;
-  message: string;
-}
+const app = express();
 
-const getRandomColor = (): string => {
-  const getByte = () => 200 + Math.floor(Math.random() * 56); // Generates values between 200 and 255
-  const color = `rgb(${getByte()},${getByte()},${getByte()})`;
-  return color;
-};
+// Middleware to log incoming requests
+app.use((req, res, next) => {
+  console.log(`Incoming request: ${req.method} ${req.url}`);
+  next();
+});
 
-const App: React.FC = () => {
-  const [logItems, setLogItems] = useState<LogItem[]>([]);
-  const [hostnameColors, setHostnameColors] = useState<{ [key: string]: string }>({});
-  const [connectionStatus, setConnectionStatus] = useState<'connected' | 'disconnected'>('disconnected');
-  const consoleRef = useRef<HTMLDivElement>(null);
-  const queue = useRef<LogItem[]>([]);
-  const isProcessingQueue = useRef(false);
+// Proxy the SSE endpoint
+app.use('/api/sse', proxy('https://your-sse-server.com', {
+  proxyReqOptDecorator: (proxyReqOpts, srcReq) => {
+    console.log(`Proxying request to: ${proxyReqOpts.protocol}//${proxyReqOpts.host}${srcReq.url}`);
+    return proxyReqOpts;
+  },
+  userResDecorator: (proxyRes, proxyResData, userReq, userRes) => {
+    console.log('Response received from target server');
+    return proxyResData;
+  },
+  proxyErrorHandler: (err, res, next) => {
+    console.error('Proxy error:', err);
+    next(err);
+  }
+}));
 
-  useEffect(() => {
-    const fetchInitialData = async () => {
-      try {
-        const response = await fetch('/api/logs'); // Replace with your actual API endpoint
-        const data: LogItem[] = await response.json();
-        setLogItems(data.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()));
-      } catch (error) {
-        console.error('Error fetching data:', error);
-      }
-    };
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(`Error handling request for ${req.url}:`, err.message);
+  res.status(500).send('Internal Server Error');
+});
 
-    fetchInitialData();
-  }, []);
-
-  useEffect(() => {
-    const eventSource = new EventSource('/api/logs/stream'); // Replace with your SSE endpoint
-
-    eventSource.onopen = () => {
-      setConnectionStatus('connected');
-    };
-
-    eventSource.onmessage = (event) => {
-      const newItem: LogItem = JSON.parse(event.data);
-      queue.current.push(newItem);
-      processQueue();
-    };
-
-    eventSource.onerror = (error) => {
-      console.error('Error with SSE connection:', error);
-      setConnectionStatus('disconnected');
-    };
-
-    return () => {
-      eventSource.close();
-    };
-  }, []);
-
-  const processQueue = () => {
-    if (queue.current.length > 0 && !isProcessingQueue.current) {
-      isProcessingQueue.current = true;
-      const item = queue.current.shift()!;
-      setLogItems((prevItems) => [...prevItems, item]);
-
-      setTimeout(() => {
-        isProcessingQueue.current = false;
-        processQueue();
-      }, 1000); // 1 second delay
-    }
-  };
-
-  useEffect(() => {
-    if (consoleRef.current) {
-      const isAtBottom = consoleRef.current.scrollTop + consoleRef.current.clientHeight >= consoleRef.current.scrollHeight - 1;
-      if (isAtBottom) {
-        consoleRef.current.scrollTop = consoleRef.current.scrollHeight;
-      }
-    }
-  }, [logItems]);
-
-  useEffect(() => {
-    logItems.forEach((item) => {
-      if (!hostnameColors[item.hostname]) {
-        setHostnameColors((prevColors) => ({ ...prevColors, [item.hostname]: getRandomColor() }));
-      }
-    });
-  }, [logItems, hostnameColors]);
-
-  return (
-    <div className="App">
-      <div id="console" ref={consoleRef}>
-        {logItems.map((item, index) => (
-          <div key={index} className={`console-item color-${item.level}`}>
-            <span>{item.timestamp} </span>
-            <span style={{ color: hostnameColors[item.hostname] }}>[{item.hostname}] </span>
-            <span>{`${item.label.toUpperCase()}: ${item.message}`}</span>
-          </div>
-        ))}
-      </div>
-      <div id="status" className={connectionStatus}></div>
-    </div>
-  );
-};
-
-export default App;
-
-body {
-    background-color: #000;
-    color: #fff;
-    font-family: 'Courier New', Courier, monospace;
-    margin: 0;
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    justify-content: flex-start;
-    align-items: flex-start;
-    padding: 20px;
-    box-sizing: border-box;
-    overflow: hidden;
-}
-
-#console {
-    background-color: #000;
-    color: #fff;
-    padding: 20px;
-    border-radius: 5px;
-    width: 100%;
-    height: calc(100% - 3px);
-    overflow-y: auto;
-    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
-    border: 1px solid #444;
-    box-sizing: border-box;
-    flex-grow: 1;
-}
-
-#status {
-    width: 100%;
-    height: 1px;
-    position: fixed;
-    bottom: 0;
-    left: 0;
-}
-
-.connected {
-    background-color: green;
-    animation: blink 1s step-end infinite;
-}
-
-.disconnected {
-    background-color: red;
-    animation: blink 1s step-end infinite;
-}
-
-@keyframes blink {
-    50% {
-        opacity: 0;
-    }
-}
-
-.console-item {
-    padding: 2px 0;
-}
-
-.color-info {
-    color: green;
-}
-
-.color-warn {
-    color: #ffbf00; /* amber color */
-}
-
-.color-error {
-    color: red;
-}
-
+app.listen(3000, () => {
+  console.log('Express server running on http://localhost:3000');
+});
