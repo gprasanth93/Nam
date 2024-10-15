@@ -1,41 +1,28 @@
-SELECT
-    s.schemaname AS "Schema Name",
-    s.relname AS "Table Name",
-    pg_size_pretty(pg_total_relation_size(s.relid)) AS "Total Relation Size",
-    pg_size_pretty(pg_table_size(s.relid)) AS "Table Size",
-    pg_size_pretty(pg_indexes_size(s.relid)) AS "Index Size",
-    pg_size_pretty(pg_total_relation_size(s.relid) - pg_relation_size(s.relid)) AS "Bloat Size",
-    stio.heap_blks_read AS "Disk Hits",
-    stio.heap_blks_hit AS "Cache Hits",
-    CASE 
-        WHEN (stio.heap_blks_read + stio.heap_blks_hit) = 0 THEN 0 
-        ELSE ROUND((stio.heap_blks_read::numeric / (stio.heap_blks_read + stio.heap_blks_hit)::numeric) * 100.0, 2) 
-    END AS "% Disk Hits",
-    CASE 
-        WHEN (stio.heap_blks_read + stio.heap_blks_hit) = 0 THEN 0 
-        ELSE ROUND((stio.heap_blks_hit::numeric / (stio.heap_blks_read + stio.heap_blks_hit)::numeric) * 100.0, 2) 
-    END AS "% Cache Hits",
-    (stio.heap_blks_read + stio.heap_blks_hit) AS "Total Hits",
-    s.n_live_tup AS "Row Estimate",
-    COALESCE(s.n_dead_tup, 0) AS "Rows Changed",
-    COALESCE(s.seq_scan, 0) AS "Seq Scan",
-    COALESCE(s.idx_scan, 0) AS "Index Scan",
-    COALESCE(s.idx_tup_fetch, 0) AS "Index Fetch",
-    CASE 
-        WHEN (s.seq_scan + s.idx_scan) = 0 THEN 0 
-        ELSE ROUND((s.idx_scan::numeric / (s.seq_scan + s.idx_scan)::numeric) * 100.0, 2) 
-    END AS "% Index Usage",
-    COALESCE(to_char(s.last_vacuum, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Last Manual Vacuum",
-    COALESCE(to_char(s.last_analyze, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Last Manual Analyze",
-    COALESCE(to_char(s.last_autovacuum, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Last Auto Vacuum",
-    COALESCE(to_char(s.last_autoanalyze, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Last Auto Analyze",
-    COALESCE(s.vacuum_count, 0) AS "Manual Vacuum Count",
-    COALESCE(s.analyze_count, 0) AS "Manual Analyze Count",
-    COALESCE(s.autovacuum_count, 0) AS "Auto Vacuum Count",
-    COALESCE(s.autoanalyze_count, 0) AS "Auto Analyze Count"
-FROM
-    pg_stat_user_tables s
-LEFT JOIN
-    pg_statio_user_tables stio ON stio.relid = s.relid
-ORDER BY
-    pg_total_relation_size(s.relid) DESC;
+SELECT 
+    blocked.pid AS blocked_pid,
+    blocked.usename AS blocked_user,
+    blocked.query AS blocked_query,
+    blocking.pid AS blocking_pid,
+    blocking.usename AS blocking_user,
+    blocking.query AS blocking_query
+FROM 
+    pg_stat_activity blocked
+JOIN 
+    pg_locks blocked_lock ON blocked_lock.pid = blocked.pid
+JOIN 
+    pg_locks blocking_lock 
+        ON blocking_lock.locktype = blocked_lock.locktype
+        AND blocking_lock.database IS NOT DISTINCT FROM blocked_lock.database
+        AND blocking_lock.relation IS NOT DISTINCT FROM blocked_lock.relation
+        AND blocking_lock.page IS NOT DISTINCT FROM blocked_lock.page
+        AND blocking_lock.tuple IS NOT DISTINCT FROM blocked_lock.tuple
+        AND blocking_lock.virtualxid IS NOT DISTINCT FROM blocked_lock.virtualxid
+        AND blocking_lock.transactionid IS NOT DISTINCT FROM blocked_lock.transactionid
+        AND blocking_lock.classid IS NOT DISTINCT FROM blocked_lock.classid
+        AND blocking_lock.objid IS NOT DISTINCT FROM blocked_lock.objid
+        AND blocking_lock.objsubid IS NOT DISTINCT FROM blocked_lock.objsubid
+        AND blocking_lock.pid != blocked_lock.pid
+JOIN 
+    pg_stat_activity blocking ON blocking.pid = blocking_lock.pid
+WHERE 
+    NOT blocked_lock.granted;
