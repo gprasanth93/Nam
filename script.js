@@ -1,19 +1,16 @@
-SELECT 
-    n.nspname AS "Schema",
-    c.relname AS "Relation",
-    CASE 
-        WHEN c.relkind = 'r' THEN 'Table'
-        WHEN c.relkind = 'i' THEN 'Index'
-        ELSE 'Other'
-    END AS "Type",
-    (c.relpages * current_setting('block_size')::int) AS "Estimated Size (Bytes)",
-    pg_size_pretty(c.relpages * current_setting('block_size')::int) AS "Estimated Size"
-FROM 
-    pg_class c
-JOIN 
-    pg_namespace n ON n.oid = c.relnamespace
-WHERE 
-    c.relkind IN ('r', 'i')  -- 'r' for tables, 'i' for indexes
-    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
-ORDER BY 
-    "Estimated Size (Bytes)" DESC;
+DO $$ 
+BEGIN
+    -- Check if the column length is 50
+    IF EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_name = 'your_table_name' 
+        AND column_name = 'your_column_name' 
+        AND character_maximum_length = 50
+    ) THEN
+        -- Alter the column length to 255 if it's currently 50
+        EXECUTE 'ALTER TABLE your_table_name 
+                 ALTER COLUMN your_column_name 
+                 TYPE VARCHAR(255);';
+    END IF;
+END $$;
