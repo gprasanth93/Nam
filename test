@@ -1,38 +1,17 @@
-SELECT
-    pg_stat_user_tables.schemaname AS "Schema Name",
-    pg_stat_user_tables.relname AS "Table Name",
-    pg_size_pretty(pg_total_relation_size(pg_stat_user_tables.relid)) AS "Total Relation Size",
-    pg_size_pretty(pg_table_size(pg_stat_user_tables.relid)) AS "Table Size",
-    pg_size_pretty(pg_indexes_size(pg_stat_user_tables.relid)) AS "Index Size",
-    pg_size_pretty(pg_total_relation_size(pg_stat_user_tables.relid) - pg_relation_size(pg_stat_user_tables.relid)) AS "Bloat Size",
-    COALESCE(statio_heap_blks_read, 0) AS "Disk hits",
-    COALESCE(statio_heap_blks_hit, 0) AS "Cache hits",
-    CASE WHEN (statio_heap_blks_read + statio_heap_blks_hit) = 0 THEN 0 
-         ELSE ROUND((statio_heap_blks_read::numeric / (statio_heap_blks_read + statio_heap_blks_hit)::numeric) * 100.0, 2) 
-    END AS "% Disk hits",
-    CASE WHEN (statio_heap_blks_read + statio_heap_blks_hit) = 0 THEN 0 
-         ELSE ROUND((statio_heap_blks_hit::numeric / (statio_heap_blks_read + statio_heap_blks_hit)::numeric) * 100.0, 2) 
-    END AS "% Cache hits",
-    (statio_heap_blks_read + statio_heap_blks_hit) AS "Total hits",
-    pg_stat_user_tables.n_live_tup AS "Row Estimate",
-    COALESCE(pg_stat_user_tables.n_dead_tup, 0) AS "Rows Changed",
-    COALESCE(pg_stat_user_tables.seq_scan, 0) AS "Seq Scan",
-    COALESCE(pg_stat_user_tables.idx_scan, 0) AS "Index Scan",
-    COALESCE(pg_stat_user_tables.idx_tup_fetch, 0) AS "Index Fetch",
-    CASE WHEN (pg_stat_user_tables.seq_scan + pg_stat_user_tables.idx_scan) = 0 THEN 0 
-         ELSE ROUND((pg_stat_user_tables.idx_scan::numeric / (pg_stat_user_tables.seq_scan + pg_stat_user_tables.idx_scan)::numeric) * 100.0, 2) 
-    END AS "% Index Usage",
-    COALESCE(to_char(pg_stat_user_tables.last_vacuum, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Manual Vacuum",
-    COALESCE(to_char(pg_stat_user_tables.last_analyze, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Manual Analyze",
-    COALESCE(to_char(pg_stat_user_tables.last_autovacuum, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Auto Vacuum",
-    COALESCE(to_char(pg_stat_user_tables.last_autoanalyze, 'DD Mon YYYY HH12:MI:SS TZ'), 'Never') AS "Auto Analyze",
-    COALESCE(pg_stat_user_tables.vacuum_count, 0) AS "Manual Vacuum Count",
-    COALESCE(pg_stat_user_tables.analyze_count, 0) AS "Manual Analyze Count",
-    COALESCE(pg_stat_user_tables.autovacuum_count, 0) AS "Auto Vacuum Count",
-    COALESCE(pg_stat_user_tables.autoanalyze_count, 0) AS "Auto Analyze Count"
-FROM
-    pg_stat_user_tables
-LEFT JOIN
-    pg_statio_user_tables stat ON stat.relid = pg_stat_user_tables.relid
-ORDER BY
-    "Total Relation Size" DESC;
+DO $$
+DECLARE
+    json_data JSON := '[
+        {"runid": "run1", "database": "db1", "passed_test": 5, "failed_test": 1, "sanity_results": {"status": "pass"}},
+        {"runid": "run2", "database": "db2", "passed_test": 8, "failed_test": 0, "sanity_results": {"status": "pass"}}
+    ]';
+BEGIN
+    INSERT INTO sanity (runid, database, passed_test, failed_test, sanity_results)
+    SELECT runid, database, passed_test, failed_test, sanity_results
+    FROM json_populate_recordset(NULL::sanity, json_data)
+    ON CONFLICT (runid) 
+    DO UPDATE SET
+        database = EXCLUDED.database,
+        passed_test = EXCLUDED.passed_test,
+        failed_test = EXCLUDED.failed_test,
+        sanity_results = EXCLUDED.sanity_results;
+END $$;
