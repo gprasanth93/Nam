@@ -1,24 +1,6 @@
-// vite.config.js
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-
-export default defineConfig({
-  plugins: [react()],
-  build: {
-    ssr: 'src/server.jsx', // Entry point for SSR
-    rollupOptions: {
-      output: {
-        format: 'cjs', // For server compatibility with Node.js
-      },
-    },
-  },
-});
-
-
-
 // src/Report.jsx
 import React from 'react';
-import { MantineProvider, Text, Table, Title } from '@mantine/core';
+import { MantineProvider, Text, Table, Title, Pill } from '@mantine/core';
 
 function Report({ data }) {
   return (
@@ -35,7 +17,7 @@ function Report({ data }) {
         <Title order={2} mt="lg" mb="sm">
           Detailed Report
         </Title>
-        <Table striped highlightOnHover>
+        <Table striped withTableBorder>
           <thead>
             <tr>
               <th>Description</th>
@@ -48,7 +30,14 @@ function Report({ data }) {
             {data.report.map((item, index) => (
               <tr key={index}>
                 <td>{item.description}</td>
-                <td>{item.result}</td>
+                <td>
+                  <Pill
+                    size="xl"
+                    color={item.result === 'Pass' ? 'green' : 'red'}
+                  >
+                    {item.result}
+                  </Pill>
+                </td>
                 <td>{item.time.toFixed(2)}</td>
                 <td>{item.message || 'N/A'}</td>
               </tr>
@@ -61,53 +50,3 @@ function Report({ data }) {
 }
 
 export default Report;
-
-
-
-// src/server.jsx
-import express from 'express';
-import React from 'react';
-import { renderToString } from 'react-dom/server';
-import Report from './Report';
-
-const app = express();
-
-app.use(express.static('dist/client'));
-
-app.get('/fullreport', (req, res) => {
-  const data = {
-    status: 'done',
-    numTotalTests: 6,
-    numPassTests: 6,
-    numFailTests: 0,
-    report: [
-      { description: 'Check if PGMaker2 API is reachable', result: 'Pass', time: 735.43 },
-      { description: 'Check if PGMaker2 logger SSE API is reachable', result: 'Pass', time: 5.91 },
-      { description: 'Check if API returns valid database credentials', result: 'Pass', time: 1207.27 },
-      { description: 'Credentials Reception for PRIMARY Database', result: 'Pass', time: 0.04 },
-      { description: 'Connect PRIMARY Database', result: 'Pass', time: 919.62 },
-      { description: 'Check PGMaker2 logger SSE data connectivity', result: 'Pass', message: '25 messages received since connection', time: 0.01 },
-    ],
-  };
-
-  const appHtml = renderToString(<Report data={data} />);
-
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Sanity Test Report</title>
-      </head>
-      <body>
-        <div id="root">${appHtml}</div>
-      </body>
-    </html>
-  `);
-});
-
-app.listen(3000, () => {
-  console.log('Server is running at http://localhost:3000');
-});
-
