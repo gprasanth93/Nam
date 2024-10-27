@@ -1,17 +1,115 @@
-DO $$
-DECLARE
-    json_data JSON := '[
-        {"runid": "run1", "database": "db1", "passed_test": 5, "failed_test": 1, "sanity_results": {"status": "pass"}},
-        {"runid": "run2", "database": "db2", "passed_test": 8, "failed_test": 0, "sanity_results": {"status": "pass"}}
-    ]';
-BEGIN
-    INSERT INTO sanity (runid, database, passed_test, failed_test, sanity_results)
-    SELECT runid, database, passed_test, failed_test, sanity_results
-    FROM json_populate_recordset(NULL::sanity, json_data)
-    ON CONFLICT (runid) 
-    DO UPDATE SET
-        database = EXCLUDED.database,
-        passed_test = EXCLUDED.passed_test,
-        failed_test = EXCLUDED.failed_test,
-        sanity_results = EXCLUDED.sanity_results;
-END $$;
+const express = require("express");
+const React = require("react");
+const ReactDOMServer = require("react-dom/server");
+const { MantineProvider, Text, Table, Title } = require("@mantine/core");
+
+// Sample report data (the same as provided in your query)
+const reportData = {
+  status: "done",
+  result: {
+    numTotalTests: 6,
+    numPassTests: 6,
+    numFailTests: 0,
+  },
+  report: [
+    {
+      description: "Check if PGMaker2 API is reachable",
+      result: "Pass",
+      time: 735.4392000000225,
+    },
+    {
+      description: "Check if PGMaker2 logger SSE API is reachable",
+      result: "Pass",
+      time: 5.915399999998044,
+    },
+    {
+      description: "Check if API returns valid database credentials",
+      result: "Pass",
+      time: 1207.2738000000245,
+    },
+    {
+      description: "Credentials Reception for PRIMARY Database",
+      result: "Pass",
+      time: 0.04079999995883554,
+    },
+    {
+      description: "Connect PRIMARY Database",
+      result: "Pass",
+      time: 919.6219999999739,
+    },
+    {
+      description: "Check gmaker2 logger SSE data connectivity",
+      result: "Pass",
+      message: "25 messages received since connection",
+      time: 0.010000000009313226,
+    },
+  ],
+};
+
+// React component for rendering the report
+function Report({ data }) {
+  return (
+    <MantineProvider theme={{ colorScheme: "dark" }}>
+      <div style={{ padding: "20px" }}>
+        <Title order={1} align="center" mb="lg">
+          PGMaker2 API Sanity Test Report
+        </Title>
+        <Text>Overall Status: {data.status}</Text>
+        <Text>Total Tests: {data.result.numTotalTests}</Text>
+        <Text>Passed Tests: {data.result.numPassTests}</Text>
+        <Text>Failed Tests: {data.result.numFailTests}</Text>
+
+        <Title order={2} mt="lg" mb="sm">
+          Detailed Report
+        </Title>
+        <Table striped highlightOnHover>
+          <thead>
+            <tr>
+              <th>Description</th>
+              <th>Result</th>
+              <th>Time (ms)</th>
+              <th>Message</th>
+            </tr>
+          </thead>
+          <tbody>
+            {data.report.map((item, index) => (
+              <tr key={index}>
+                <td>{item.description}</td>
+                <td>{item.result}</td>
+                <td>{item.time.toFixed(2)}</td>
+                <td>{item.message || "N/A"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </Table>
+      </div>
+    </MantineProvider>
+  );
+}
+
+const app = express();
+
+// Endpoint to render the report as an HTML page
+app.get("/fullreport", (req, res) => {
+  const reportHtml = ReactDOMServer.renderToString(
+    <Report data={reportData} />
+  );
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Sanity Test Report</title>
+        <style>body { margin: 0; font-family: Arial, sans-serif; }</style>
+      </head>
+      <body>
+        <div id="root">${reportHtml}</div>
+      </body>
+    </html>
+  `);
+});
+
+app.listen(3000, () => {
+  console.log("Server is running on http://localhost:3000");
+});
