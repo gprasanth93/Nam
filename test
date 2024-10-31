@@ -1,52 +1,45 @@
-// src/Report.jsx
-import React from 'react';
-import { MantineProvider, Text, Table, Title, Pill } from '@mantine/core';
+PGMaker SanityPack: Keep PostgreSQL Running Smoothly
 
-function Report({ data }) {
-  return (
-    <MantineProvider theme={{ colorScheme: 'dark' }}>
-      <div style={{ padding: '20px' }}>
-        <Title order={1} align="center" mb="lg">
-          PGMaker2 API Sanity Test Report
-        </Title>
-        <Text>Overall Status: {data.status}</Text>
-        <Text>Total Tests: {data.numTotalTests}</Text>
-        <Text>Passed Tests: {data.numPassTests}</Text>
-        <Text>Failed Tests: {data.numFailTests}</Text>
+The PGMaker SanityPack helps you monitor and test PostgreSQL infrastructure, ensuring your database system stays healthy.
 
-        <Title order={2} mt="lg" mb="sm">
-          Detailed Report
-        </Title>
-        <Table striped withTableBorder>
-          <thead>
-            <tr>
-              <th>Description</th>
-              <th>Result</th>
-              <th>Time (ms)</th>
-              <th>Message</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.report.map((item, index) => (
-              <tr key={index}>
-                <td>{item.description}</td>
-                <td>
-                  <Pill
-                    size="xl"
-                    color={item.result === 'Pass' ? 'green' : 'red'}
-                  >
-                    {item.result}
-                  </Pill>
-                </td>
-                <td>{item.time.toFixed(2)}</td>
-                <td>{item.message || 'N/A'}</td>
-              </tr>
-            ))}
-          </tbody>
-        </Table>
-      </div>
-    </MantineProvider>
-  );
-}
+Key Features
 
-export default Report;
+Infrastructure Check: Confirms network connectivity.
+
+Database Credentials: Retrieves credentials securely.
+
+Database Connection: Verifies the database is accessible.
+
+Observer Check: Ensures the PGMaker Observer manages nodes correctly during a disaster.
+
+Metrics Check: Monitors memory, CPU, and I/O metrics.
+
+Dashboard Access: Confirms the PGMaker Dashboard is accessible.
+
+Logger Check: Ensures Logger service is operational.
+
+SSE Connection: Monitors real-time events via Logger's SSE API.
+
+Benefits
+
+Early Detection: Spot problems before they escalate.
+
+Comprehensive Monitoring: Checks network, metrics, nodes, and logging.
+
+Disaster Resilience: Ensures failover operations work smoothly.
+
+Real-time Monitoring: Tracks critical events as they happen.
+
+Coming Next
+
+New Database Creation: Automate new database setup.
+
+Database Restart: Add restart functionality for troubleshooting.
+
+Snapshot and PITR Tests: Validate backup and recovery.
+
+Controlled Restarts: Test stability through reboots.
+
+Final Thoughts
+
+PGMaker SanityPack simplifies PostgreSQL monitoring, helping prevent issues before they occur. Upcoming features will make it even more robust.
