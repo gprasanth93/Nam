@@ -1,37 +1,52 @@
-const rateLimit = require('express-rate-limit');
+const express = require('express');
+const RateLimiter = require('express-rate-flexible');
 
-// Object to store exceeded URLs for monitoring
+const app = express();
+
+// Object to track exceeded URLs
 const exceededUrls = {};
 
-// Custom Memory Store extending the default MemoryStore
-class CustomMemoryStore extends rateLimit.MemoryStore {
-  constructor() {
-    super();
-  }
+// Configure the rate limiter for memory storage
+const rateLimiter = new RateLimiter({
+  store: 'memory', // Use in-memory storage
+  points: 10, // Number of allowed requests per 15 minutes
+  duration: 15 * 60, // Reset time in seconds (15 minutes)
+  keyGenerator: (req) => req.originalUrl // Rate limit by URL, making each unique dbName path separate
+});
 
-  // Override the increment method to track totalHits and resetTime
-  increment(key, cb) {
-    super.increment(key, (err, { totalHits, resetTime }) => {
-      if (err) return cb(err);
+// Apply rate limiter only to the specific endpoint /api/data/:dbName
+app.get('/api/data/:dbName', (req, res, next) => {
+  const key = req.originalUrl;
 
-      // Track exceeded URLs based on the totalHits
-      if (totalHits >= 10) {
-        exceededUrls[key] = { totalHits, resetTime };
-      } else {
-        // Remove the key from exceededUrls if it's below the threshold
+  rateLimiter.consume(key)
+    .then((rateLimitInfo) => {
+      // Remove URL from exceededUrls if it's under the limit
+      if (exceededUrls[key]) {
         delete exceededUrls[key];
       }
-
-      // Pass the original response to the callback
-      cb(null, { totalHits, resetTime });
+      req.rateLimitInfo = rateLimitInfo;
+      next();
+    })
+    .catch((rateLimitInfo) => {
+      // Add URL to exceededUrls if it exceeds the rate limit
+      exceededUrls[key] = rateLimitInfo;
+      res.status(429).send("Too many requests, please try again later.");
     });
-  }
+}, (req, res) => {
+  const dbName = req.params.dbName;
+  res.send(`Data for /api/data/${dbName}`);
+});
 
-  // Override the resetAll method to clear the exceededUrls object
-  resetAll() {
-    super.resetAll();
-    Object.keys(exceededUrls).forEach(key => delete exceededUrls[key]);
-  }
-}
+// Monitoring endpoint to get rate-limit status
+app.get('/api/rate-stats', (req, res) => {
+  res.json({
+    exceededUrls,
+    monitoredUrls: Object.keys(rateLimiter._inMemoryStorage) // List of URLs currently tracked in memory
+  });
+});
 
-module.exports = { CustomMemoryStore, exceededUrls };
+// Start the server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
