@@ -5,14 +5,15 @@ const app = express();
 
 // Define the rate limiter using in-memory storage
 const rateLimiter = new RateLimiterMemory({
-  points: 10, // Number of allowed requests
+  points: 10, // Number of allowed requests per 15 minutes
   duration: 15 * 60, // Reset time in seconds (15 minutes)
   keyPrefix: 'rate-limit', // Prefix for keys in memory store
   execEvenly: false, // Immediate blocking when limits are exceeded
 });
 
-// Object to track exceeded URLs
+// Object to track exceeded URLs and monitored URLs
 const exceededUrls = {};
+const monitoredUrlsSet = new Set(); // Using a set to track monitored URLs
 
 // Middleware to apply rate limiting to /api/data/:dbName
 const rateLimitMiddleware = async (req, res, next) => {
@@ -24,15 +25,17 @@ const rateLimitMiddleware = async (req, res, next) => {
     if (exceededUrls[key]) {
       delete exceededUrls[key];
     }
+    // Add the key to the monitored URLs set
+    monitoredUrlsSet.add(key);
     req.rateLimitInfo = rateLimitInfo;
     next();
   } catch (rateLimitInfo) {
     // Add URL to exceededUrls if it exceeds the rate limit
     exceededUrls[key] = {
       totalHits: rateLimitInfo.consumedPoints,
-      resetTime: rateLimitInfo.msBeforeNext
+      resetTime: rateLimitInfo.msBeforeNext,
     };
-    res.status(429).send("Too many requests, please try again later.");
+    res.status(429).send('Too many requests, please try again later.');
   }
 };
 
@@ -46,7 +49,7 @@ app.get('/api/data/:dbName', rateLimitMiddleware, (req, res) => {
 app.get('/api/rate-stats', (req, res) => {
   res.json({
     exceededUrls,
-    monitoredUrls: rateLimiter._memoryStorage ? Object.keys(rateLimiter._memoryStorage.storage) : []
+    monitoredUrls: Array.from(monitoredUrlsSet), // Convert the set to an array for response
   });
 });
 
