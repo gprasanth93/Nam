@@ -1,20 +1,37 @@
+const rateLimit = require('express-rate-limit');
+
+// Object to store exceeded URLs for monitoring
+const exceededUrls = {};
+
+// Custom Memory Store extending the default MemoryStore
 class CustomMemoryStore extends rateLimit.MemoryStore {
   constructor() {
     super();
   }
 
+  // Override the increment method to track totalHits and resetTime
   increment(key, cb) {
-    super.increment(key, (err, { total, resetTime }) => {
+    super.increment(key, (err, { totalHits, resetTime }) => {
       if (err) return cb(err);
 
-      // Additional logic for exceeded URLs
-      if (total >= 10) {
-        exceededUrls[key] = { total, resetTime };
+      // Track exceeded URLs based on the totalHits
+      if (totalHits >= 10) {
+        exceededUrls[key] = { totalHits, resetTime };
       } else {
+        // Remove the key from exceededUrls if it's below the threshold
         delete exceededUrls[key];
       }
 
-      cb(null, { total, resetTime });
+      // Pass the original response to the callback
+      cb(null, { totalHits, resetTime });
     });
   }
+
+  // Override the resetAll method to clear the exceededUrls object
+  resetAll() {
+    super.resetAll();
+    Object.keys(exceededUrls).forEach(key => delete exceededUrls[key]);
+  }
 }
+
+module.exports = { CustomMemoryStore, exceededUrls };
