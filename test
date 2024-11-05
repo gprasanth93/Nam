@@ -1,45 +1,61 @@
-PGMaker SanityPack: Keep PostgreSQL Running Smoothly
+const express = require('express');
+const rateLimit = require('express-rate-limit');
 
-The PGMaker SanityPack helps you monitor and test PostgreSQL infrastructure, ensuring your database system stays healthy.
+const app = express();
 
-Key Features
+// In-memory object to store exceeded URLs for monitoring
+const exceededUrls = {};
 
-Infrastructure Check: Confirms network connectivity.
+// Custom memory store to expose rate limit states
+class CustomMemoryStore extends rateLimit.MemoryStore {
+  increment(key, cb) {
+    super.increment(key, (err, { total, resetTime }) => {
+      // Store the URL in exceededUrls if the rate limit has been exceeded
+      if (total >= 10) {
+        exceededUrls[key] = {
+          total,
+          resetTime
+        };
+      } else if (exceededUrls[key] && total < 10) {
+        // Remove the URL from exceededUrls once it's back within limits
+        delete exceededUrls[key];
+      }
+      cb(err, { total, resetTime });
+    });
+  }
 
-Database Credentials: Retrieves credentials securely.
+  resetAll() {
+    super.resetAll();
+    Object.keys(exceededUrls).forEach(key => delete exceededUrls[key]); // Clear exceededUrls on reset
+  }
+}
 
-Database Connection: Verifies the database is accessible.
+// Define a rate limiter with the custom store
+const dataRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 10, // Limit each URL to 10 requests per windowMs
+  message: "Too many requests, please try again later.",
+  standardHeaders: true,
+  legacyHeaders: false,
+  store: new CustomMemoryStore()
+});
 
-Observer Check: Ensures the PGMaker Observer manages nodes correctly during a disaster.
+// Apply rate limiter to specific route
+app.get('/api/data/:dbName', dataRateLimiter, (req, res) => {
+  const dbName = req.params.dbName;
+  res.send(`Data for /api/data/${dbName} endpoint.`);
+});
 
-Metrics Check: Monitors memory, CPU, and I/O metrics.
+// Endpoint to get rate limit status for exceeded URLs
+app.get('/api/rate-stats', (req, res) => {
+  res.json({
+    exceededUrls,
+    monitoredUrls: Object.keys(dataRateLimiter.store.hits) // List of all URLs currently in memory
+  });
+});
 
-Dashboard Access: Confirms the PGMaker Dashboard is accessible.
-
-Logger Check: Ensures Logger service is operational.
-
-SSE Connection: Monitors real-time events via Logger's SSE API.
-
-Benefits
-
-Early Detection: Spot problems before they escalate.
-
-Comprehensive Monitoring: Checks network, metrics, nodes, and logging.
-
-Disaster Resilience: Ensures failover operations work smoothly.
-
-Real-time Monitoring: Tracks critical events as they happen.
-
-Coming Next
-
-New Database Creation: Automate new database setup.
-
-Database Restart: Add restart functionality for troubleshooting.
-
-Snapshot and PITR Tests: Validate backup and recovery.
-
-Controlled Restarts: Test stability through reboots.
-
-Final Thoughts
-
-PGMaker SanityPack simplifies PostgreSQL monitoring, helping prevent issues before they occur. Upcoming features will make it even more robust.
+// Start the server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
