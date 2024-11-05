@@ -1,47 +1,52 @@
 const express = require('express');
-const RateLimiter = require('express-rate-flexible');
+const { RateLimiterMemory } = require('rate-limiter-flexible');
 
 const app = express();
+
+// Define the rate limiter using in-memory storage
+const rateLimiter = new RateLimiterMemory({
+  points: 10, // Number of allowed requests
+  duration: 15 * 60, // Reset time in seconds (15 minutes)
+  keyPrefix: 'rate-limit', // Prefix for keys in memory store
+  execEvenly: false, // Immediate blocking when limits are exceeded
+});
 
 // Object to track exceeded URLs
 const exceededUrls = {};
 
-// Configure the rate limiter for memory storage
-const rateLimiter = new RateLimiter({
-  store: 'memory', // Use in-memory storage
-  points: 10, // Number of allowed requests per 15 minutes
-  duration: 15 * 60, // Reset time in seconds (15 minutes)
-  keyGenerator: (req) => req.originalUrl // Rate limit by URL, making each unique dbName path separate
-});
-
-// Apply rate limiter only to the specific endpoint /api/data/:dbName
-app.get('/api/data/:dbName', (req, res, next) => {
+// Middleware to apply rate limiting to /api/data/:dbName
+const rateLimitMiddleware = async (req, res, next) => {
   const key = req.originalUrl;
 
-  rateLimiter.consume(key)
-    .then((rateLimitInfo) => {
-      // Remove URL from exceededUrls if it's under the limit
-      if (exceededUrls[key]) {
-        delete exceededUrls[key];
-      }
-      req.rateLimitInfo = rateLimitInfo;
-      next();
-    })
-    .catch((rateLimitInfo) => {
-      // Add URL to exceededUrls if it exceeds the rate limit
-      exceededUrls[key] = rateLimitInfo;
-      res.status(429).send("Too many requests, please try again later.");
-    });
-}, (req, res) => {
+  try {
+    const rateLimitInfo = await rateLimiter.consume(key); // Consume 1 point per request
+    // Remove URL from exceededUrls if it's under the limit
+    if (exceededUrls[key]) {
+      delete exceededUrls[key];
+    }
+    req.rateLimitInfo = rateLimitInfo;
+    next();
+  } catch (rateLimitInfo) {
+    // Add URL to exceededUrls if it exceeds the rate limit
+    exceededUrls[key] = {
+      totalHits: rateLimitInfo.consumedPoints,
+      resetTime: rateLimitInfo.msBeforeNext
+    };
+    res.status(429).send("Too many requests, please try again later.");
+  }
+};
+
+// Apply rate limiter to a specific route
+app.get('/api/data/:dbName', rateLimitMiddleware, (req, res) => {
   const dbName = req.params.dbName;
   res.send(`Data for /api/data/${dbName}`);
 });
 
-// Monitoring endpoint to get rate-limit status
+// Monitoring endpoint to get rate limit status
 app.get('/api/rate-stats', (req, res) => {
   res.json({
     exceededUrls,
-    monitoredUrls: Object.keys(rateLimiter._inMemoryStorage) // List of URLs currently tracked in memory
+    monitoredUrls: rateLimiter._memoryStorage ? Object.keys(rateLimiter._memoryStorage.storage) : []
   });
 });
 
