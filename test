@@ -1,56 +1,73 @@
 const express = require('express');
-const { RateLimiterMemory } = require('rate-limiter-flexible');
+const { Pool } = require('pg');
 
 const app = express();
 
-// Define the rate limiter using in-memory storage
-const rateLimiter = new RateLimiterMemory({
-  points: 10, // Number of allowed requests per 15 minutes
-  duration: 15 * 60, // Reset time in seconds (15 minutes)
-  keyPrefix: 'rate-limit', // Prefix for keys in memory store
-  execEvenly: false, // Immediate blocking when limits are exceeded
+// Configure the PostgreSQL connection pool
+const pool = new Pool({
+  user: 'your_db_user',
+  host: 'localhost',
+  database: 'your_database_name',
+  password: 'your_db_password',
+  port: 5432,
+  // Set pool-wide timeout for idle clients or connection creation
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 5000,
 });
 
-// Object to track exceeded URLs and monitored URLs
-const exceededUrls = {};
-const monitoredUrlsSet = new Set(); // Using a set to track monitored URLs
+const API_TIMEOUT = 15000; // 15 seconds
 
-// Middleware to apply rate limiting to /api/data/:dbName
-const rateLimitMiddleware = async (req, res, next) => {
-  const key = req.originalUrl;
+// Middleware to set a timeout for API requests
+app.use((req, res, next) => {
+  res.setTimeout(API_TIMEOUT, () => {
+    res.status(504).send('Request timed out');
+  });
+  next();
+});
+
+// Define the endpoint to run the query
+app.get('/api/logs', async (req, res) => {
+  const { label, level, message } = req.query;
+
+  let query = `SELECT database, "label" FROM logs WHERE 1=1`;
+  const params = [];
+
+  // Dynamically build the WHERE clause
+  if (label) {
+    query += ` AND "label" = $${params.length + 1}`;
+    params.push(label);
+  }
+  if (level) {
+    query += ` AND "level" = $${params.length + 1}`;
+    params.push(level);
+  }
+  if (message) {
+    query += ` AND message ILIKE $${params.length + 1}`;
+    params.push(`%${message}%`);
+  }
+
+  query += ` GROUP BY database, "label"`;
 
   try {
-    const rateLimitInfo = await rateLimiter.consume(key); // Consume 1 point per request
-    // Remove URL from exceededUrls if it's under the limit
-    if (exceededUrls[key]) {
-      delete exceededUrls[key];
-    }
-    // Add the key to the monitored URLs set
-    monitoredUrlsSet.add(key);
-    req.rateLimitInfo = rateLimitInfo;
-    next();
-  } catch (rateLimitInfo) {
-    // Add URL to exceededUrls if it exceeds the rate limit
-    exceededUrls[key] = {
-      totalHits: rateLimitInfo.consumedPoints,
-      resetTime: rateLimitInfo.msBeforeNext,
+    // Set a timeout on the database query
+    const dbQueryTimeout = {
+      text: query,
+      values: params,
+      rowMode: 'array', // Optional: Set rowMode if you need arrays instead of objects
+      statement_timeout: 10000, // Set a timeout in milliseconds for this particular query (10 seconds)
     };
-    res.status(429).send('Too many requests, please try again later.');
+
+    const result = await pool.query(dbQueryTimeout);
+
+    if (result.rowCount === 0) {
+      return res.sendStatus(204); // No content
+    }
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Database query error:', err);
+    res.status(500).send('Internal server error');
   }
-};
-
-// Apply rate limiter to a specific route
-app.get('/api/data/:dbName', rateLimitMiddleware, (req, res) => {
-  const dbName = req.params.dbName;
-  res.send(`Data for /api/data/${dbName}`);
-});
-
-// Monitoring endpoint to get rate limit status
-app.get('/api/rate-stats', (req, res) => {
-  res.json({
-    exceededUrls,
-    monitoredUrls: Array.from(monitoredUrlsSet), // Convert the set to an array for response
-  });
 });
 
 // Start the server
