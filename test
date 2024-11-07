@@ -1,77 +1,118 @@
-const express = require('express');
-const { Pool } = require('pg');
+const express = require("express");
+const { Client } = require("pg");
+const fetch = require("node-fetch");
 
-const app = express();
-
-// Configure the PostgreSQL connection pool
-const pool = new Pool({
-  user: 'your_db_user',
-  host: 'localhost',
-  database: 'your_database_name',
-  password: 'your_db_password',
-  port: 5432,
-  // Set pool-wide timeout for idle clients or connection creation
-  idleTimeoutMillis: 10000,
-  connectionTimeoutMillis: 5000,
+const dbClient = new Client({
+  connectionString: "postgres://username:password@localhost:5432/mydatabase",
 });
+dbClient.connect();
 
-const API_TIMEOUT = 15000; // 15 seconds
+const NODE_ID = process.env.NODE_ID || "node1"; // Unique ID for each node
+const PORT = process.env.PORT || 3000;
+const PROCESS_TIMEOUT = 10000; // Timeout in milliseconds (e.g., 10 seconds)
 
-// Middleware to set a timeout for API requests
-app.use((req, res, next) => {
-  res.setTimeout(API_TIMEOUT, () => {
-    res.status(504).send('Request timed out');
+let ongoingProcess = null; // Shared promise for ongoing processing
+
+async function processData() {
+  // Simulate a long-running process
+  return new Promise((resolve) => setTimeout(() => resolve("Data processed"), 5000));
+}
+
+// Helper function to add a timeout to a promise
+function withTimeout(promise, timeout) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Process timed out")), timeout);
+    promise
+      .then((result) => {
+        clearTimeout(timer);
+        resolve(result);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
   });
-  next();
-});
+}
 
-// Define the endpoint to run the query
-app.get('/api/logs', async (req, res) => {
-  const { label, level, message } = req.query;
-
-  let query = `SELECT database, "label" FROM logs WHERE 1=1`;
-  const params = [];
-
-  // Dynamically build the WHERE clause
-  if (label) {
-    query += ` AND "label" = $${params.length + 1}`;
-    params.push(label);
-  }
-  if (level) {
-    query += ` AND "level" = $${params.length + 1}`;
-    params.push(level);
-  }
-  if (message) {
-    query += ` AND message ILIKE $${params.length + 1}`;
-    params.push(`%${message}%`);
-  }
-
-  query += ` GROUP BY database, "label"`;
-
+async function fetchData(req, res) {
   try {
-    // Set a timeout on the database query
-    const dbQueryTimeout = {
-      text: query,
-      values: params,
-      rowMode: 'array', // Optional: Set rowMode if you need arrays instead of objects
-      statement_timeout: 10000, // Set a timeout in milliseconds for this particular query (10 seconds)
-    };
-
-    const result = await pool.query(dbQueryTimeout);
-
-    if (result.rowCount === 0) {
-      return res.sendStatus(204); // No content
+    // Check if there is an ongoing process on this node
+    if (ongoingProcess) {
+      console.log("Ongoing process found on this node, returning the same promise.");
+      const resultData = await ongoingProcess; // Wait for the existing promise to resolve
+      return res.json({ status: "completed", data: resultData });
     }
 
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Database query error:', err);
-    res.status(500).send('Internal server error');
-  }
-});
+    // Check if any other node is already processing the data
+    const query = `
+      SELECT node_id, last_result, updated_at, runningstatus
+      FROM process_status
+      WHERE process_name = 'data_process' AND runningstatus = TRUE AND (NOW() - updated_at) < INTERVAL '1 minute'
+    `;
+    const result = await dbClient.query(query);
 
-// Start the server
-const PORT = process.env.PORT || 3000;
+    if (result.rows.length > 0) {
+      const activeNode = result.rows[0].node_id;
+
+      if (activeNode !== NODE_ID) {
+        // Another node is processing - forward the request and await the result
+        console.log(`Process already running on ${activeNode}, forwarding request...`);
+        const response = await fetch(`http://${activeNode}:${PORT}/api/process`);
+        const data = await response.json();
+        return res.json(data);
+      }
+    }
+
+    // If no active process, start processing on this node and set up the promise
+    console.log("Starting new process on this node...");
+
+    // Insert or update the process status for this node
+    await dbClient.query(`
+      INSERT INTO process_status (process_name, node_id, updated_at, runningstatus)
+      VALUES ('data_process', $1, NOW(), TRUE)
+      ON CONFLICT (process_name)
+      DO UPDATE SET node_id = $1, updated_at = NOW(), runningstatus = TRUE
+    `, [NODE_ID]);
+
+    // Start the process with a timeout and store the promise in `ongoingProcess`
+    ongoingProcess = withTimeout(processData(), PROCESS_TIMEOUT)
+      .then(async (resultData) => {
+        // Update the last result in the database and mark the process as not running
+        await dbClient.query(`
+          UPDATE process_status
+          SET last_result = $1, updated_at = NOW(), runningstatus = FALSE
+          WHERE process_name = 'data_process'
+        `, [resultData]);
+
+        // Reset ongoingProcess to null after completion
+        ongoingProcess = null;
+        return resultData;
+      })
+      .catch(async (error) => {
+        // In case of error, set runningstatus to FALSE and reset ongoingProcess
+        console.error("Process failed or timed out:", error.message);
+        await dbClient.query(`
+          UPDATE process_status
+          SET runningstatus = FALSE, updated_at = NOW()
+          WHERE process_name = 'data_process'
+        `);
+        ongoingProcess = null;
+        throw error;
+      });
+
+    // Wait for the process to complete and respond with the result
+    const resultData = await ongoingProcess;
+    res.json({ status: "completed", data: resultData });
+  } catch (error) {
+    // If there's an error, return an error response
+    res.status(500).json({ status: "error", error: error.message });
+  }
+}
+
+// Express setup
+const app = express();
+app.get("/api/process", fetchData);
+
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT} (Node ID: ${NODE_ID})`);
 });
