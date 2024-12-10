@@ -1,78 +1,8 @@
-Here's the updated version of your year-end performance review with the new point added:
-
----
-
-**Year-End Performance Review**
-
-**Overview**  
-Throughout this year, I made significant contributions to the pgmaker team, enhancing our internal database-as-a-service (DBaaS) offering's security, scalability, and usability. By focusing on critical feature development, proactive support, and collaboration, I have helped strengthen pgmaker's role as a reliable, secure, and effective platform for internal users.
-
----
-
-### Key Achievements
-
-1. **Dynamic Service Authentication**  
-   Developed a dynamic service-to-service Keepie authentication protocol, enabling only designated services to access pgmaker. This critical security enhancement ensures authorized access and protects sensitive data.
-
-2. **Introduction of pgmaker Command**  
-   Built the pgmaker command utility as a core service, enabling users to perform essential database management tasks like stopping, promoting, and restarting databases. This addition has streamlined operations, making it easier for users to manage databases independently.
-
-3. **pg Metrics Service**  
-   Created an internal implementation of the pg metrics service, which provides real-time database-level metrics. This tool has become widely used by users to optimize database performance and enhance decision-making.
-
-4. **Snapshot Feature for Analytics**  
-   Designed the Snapshot feature, allowing users to create and manage replicas of primary databases. Actively used by the Saber team, this feature has proven valuable for analytics and data management, supporting complex workflows across teams.
-
-5. **Point-in-Time Recovery (PITR)**  
-   Developed the PITR feature, enabling users to restore databases to previous states—an essential tool for data recovery. This feature is actively used by the CRM and other teams, significantly enhancing pgmaker's value as a DAAS provider.
-
-6. **Automated Password Rotation**  
-   Implemented automated password rotation for all databases to elevate security standards and protect sensitive data.
-
-7. **Dynamic Implementation of pgBouncer**  
-   Rolled out a dynamic configuration for pgBouncer, allowing consumers outside DHP to securely access databases. This flexibility has extended pgmaker's functionality, making it more versatile as a service.
-
-8. **pg Cron Integration**  
-   Added pg cron as a built-in feature, simplifying the management of cron jobs within the database itself. This feature has reduced operational burdens across nodes, bringing efficiency and ease to task scheduling.
-
-9. **API Rate Limiting**  
-   Implemented API rate limiting for pgmaker, safeguarding DHP servers from potential overuse and ensuring stable performance for all users.
-
-10. **Troubleshooting with Server-Sent Events (SSE)**  
-    Launched pgmaker events using Server-Sent Events (SSE), addressing a major pain point around connectivity and password issues. This solution has been widely embraced by users, significantly improving their troubleshooting experience.
-
-11. **Resource Optimization During Role Swaps**  
-    Introduced a dynamic rate limit for pgmaker base backups based on database size during role swaps, which protects DHP servers from overload and optimizes resource use effectively.
-
-12. **Python Boilerplate Code for New Users**  
-    Developed Python boilerplate code for new users, accelerating their onboarding and enhancing pgmaker’s accessibility for Python consumers.
-
-13. **pgmaker Sanity Service**  
-    Established the pgmaker sanity service, which automatically tests critical features and APIs—like pg-observer, dashboard, pg metrics, and pg logger—post-changes, ensuring a stable and reliable environment for the 500+ databases running in production.
-
-14. **pgmaker to pgmaker2 Migration**  
-    Actively supported the migration to pgmaker2, organizing calls to introduce the new features and encouraging the CPMI team to transition smoothly.
-
-15. **Role Swap Issue Monitoring and Resolution**  
-    Proactively monitored and resolved issues during pgmaker role swaps, providing immediate solutions and implementing preventative measures for improved system reliability.
-
-16. **SRE Role Swap Operations in PROD and UAT**  
-    Engaged in SRE-related tasks, including executing role swaps in both production and UAT environments to ensure operational continuity.
-
-17. **Database Integration into KVM**  
-    Actively involved in transitioning databases to KVM, a strategic shift set to enhance pgmaker’s infrastructure and support future growth.
-
-18. **Support for XDS Team with SSE and Resiliency Solutions**  
-    Collaborated with the XDS team, offering guidance and implementing solutions in Server-Sent Events (SSE), resiliency, and monitoring to strengthen their applications.
-
-19. **Knowledge Sharing in XLT Calls & Symphony Support**  
-    Regularly shared updates about newly implemented features in XLT calls, ensuring wider teams are well-informed. Additionally, I supported colleagues by providing guidance and troubleshooting assistance in Symphony, fostering better understanding and smoother implementation across teams.
-
----
-
-**Conclusion**  
-This year, I focused on improving pgmaker's functionality and security, meeting high standards in reliability and user satisfaction. Through collaborative efforts and hands-on support for internal teams, I have contributed to making pgmaker a dependable and efficient DBaaS product that meets evolving demands across the organization. 
-
---- 
-
-Let me know if you'd like to add any other details or tweaks!
+const command = `
+ps aux | grep "${vmName}" | grep -- "-api-sock" | while read -r line; do
+    search_keywords=$(echo "$line" | grep -oP '${vmName}\\S*');
+    mac_address=$(echo "$line" | awk -F' ' '{print $1}');
+    ip_address=$(echo "$line" | awk -F' ' '{print $2}');
+    echo "Keyword: $search_keywords -> IP: $ip_address -> MAC: $mac_address";
+done
+`;
