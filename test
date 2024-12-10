@@ -1,4 +1,8 @@
-const command = `
+const { spawn } = require("child_process");
+
+const listVm = async (req, res) => {
+  const vmName = "firecracker-sk-pgmaker-m-db"; // Example VM name
+  const command = `
 ps aux | grep '${vmName}' | grep -- '-api-sock' | while read -r line; do
     search_keywords=$(echo "$line" | grep -oP '${vmName}\\S*');
     mac_address=$(echo "$line" | awk -F' ' '{print $1}');
@@ -6,3 +10,43 @@ ps aux | grep '${vmName}' | grep -- '-api-sock' | while read -r line; do
     echo "Keyword: $search_keywords -> IP: $ip_address -> MAC: $mac_address";
 done
 `;
+
+  // Use spawn with `/bin/bash` to execute the shell command
+  const shellProcess = spawn("/bin/bash", ["-c", command]);
+
+  let stdout = "";
+  let stderr = "";
+
+  // Collect stdout
+  shellProcess.stdout.on("data", (data) => {
+    stdout += data.toString();
+  });
+
+  // Collect stderr
+  shellProcess.stderr.on("data", (data) => {
+    stderr += data.toString();
+  });
+
+  // Handle process exit
+  shellProcess.on("close", (code) => {
+    if (code !== 0) {
+      console.error(`Error listing VMs: ${stderr}`);
+      return res.status(500).json({ error: stderr.trim() });
+    }
+    const result = stdout
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const parts = line.split("->").map((part) => part.split(":")[1].trim());
+        return { keyword: parts[0], ip: parts[1], mac: parts[2] };
+      });
+    console.log(`VM list result: ${JSON.stringify(result)}`);
+    res.status(200).json(result);
+  });
+
+  // Handle errors
+  shellProcess.on("error", (error) => {
+    console.error(`Failed to start process: ${error.message}`);
+    res.status(500).json({ error: error.message });
+  });
+};
