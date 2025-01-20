@@ -1,52 +1,99 @@
-const { spawn } = require("child_process");
+const { Client, Pool } = require('pg');
 
-const listVm = async (req, res) => {
-  const vmName = "firecracker-sk-pgmaker-m-db"; // Example VM name
-  const command = `
-ps aux | grep '${vmName}' | grep -- '-api-sock' | while read -r line; do
-    search_keywords=$(echo "$line" | grep -oP '${vmName}\\S*');
-    mac_address=$(echo "$line" | awk -F' ' '{print $1}');
-    ip_address=$(echo "$line" | awk -F' ' '{print $2}');
-    echo "Keyword: $search_keywords -> IP: $ip_address -> MAC: $mac_address";
-done
-`;
-
-  // Use spawn with `/bin/bash` to execute the shell command
-  const shellProcess = spawn("/bin/bash", ["-c", command]);
-
-  let stdout = "";
-  let stderr = "";
-
-  // Collect stdout
-  shellProcess.stdout.on("data", (data) => {
-    stdout += data.toString();
-  });
-
-  // Collect stderr
-  shellProcess.stderr.on("data", (data) => {
-    stderr += data.toString();
-  });
-
-  // Handle process exit
-  shellProcess.on("close", (code) => {
-    if (code !== 0) {
-      console.error(`Error listing VMs: ${stderr}`);
-      return res.status(500).json({ error: stderr.trim() });
-    }
-    const result = stdout
-      .trim()
-      .split("\n")
-      .map((line) => {
-        const parts = line.split("->").map((part) => part.split(":")[1].trim());
-        return { keyword: parts[0], ip: parts[1], mac: parts[2] };
-      });
-    console.log(`VM list result: ${JSON.stringify(result)}`);
-    res.status(200).json(result);
-  });
-
-  // Handle errors
-  shellProcess.on("error", (error) => {
-    console.error(`Failed to start process: ${error.message}`);
-    res.status(500).json({ error: error.message });
-  });
+// Initial PostgreSQL client configuration
+let pgConfig = {
+  user: 'u4389556_validation_db',
+  host: 'gb125068317.systems.uk.hsbc',
+  database: 'u4389556_validation_db',
+  password: 'tsjn2048kdtcssahdw3jn',
+  port: 19713,
 };
+
+// Active pools mapped to their passwords
+const pools = new Map();
+let currentPassword = pgConfig.password;
+
+// Create a PostgreSQL client
+const client = new Client(pgConfig);
+
+// Connect to the PostgreSQL server
+client.connect();
+
+// Listen for notifications on a specific channel
+client.query('LISTEN pgmaker_channel');
+
+// Function to create a new pool
+function createNewPool(password) {
+  const config = { ...pgConfig, password };
+  const newPool = new Pool(config);
+  pools.set(password, newPool);
+  return newPool;
+}
+
+// Create the initial pool
+createNewPool(pgConfig.password);
+
+// Handle notifications
+client.on('notification', async (msg) => {
+  console.log('Received notification:', msg);
+
+  const payload = JSON.parse(msg.payload);
+
+  if (payload.eventType === 'authorization') {
+    console.log('Password updated:', payload.password);
+
+    const newPassword = payload.password;
+
+    // Check if the new password is already active
+    if (pools.has(newPassword)) {
+      console.log('Pool with the new password already exists.');
+      return;
+    }
+
+    // Update the global config and create a new pool
+    pgConfig.password = newPassword;
+    currentPassword = newPassword;
+    createNewPool(newPassword);
+
+    // Schedule the cleanup of old pools
+    cleanUpOldPools();
+  }
+});
+
+// Function to query the database
+async function queryDatabase(queryText, params) {
+  try {
+    const pool = pools.get(currentPassword);
+    const client = await pool.connect();
+
+    try {
+      const res = await client.query(queryText, params);
+      return res;
+    } finally {
+      client.release();
+    }
+  } catch (err) {
+    console.error('Database query error:', err);
+    throw err;
+  }
+}
+
+// Function to clean up old pools
+function cleanUpOldPools() {
+  for (const [password, pool] of pools.entries()) {
+    if (password !== currentPassword) {
+      pool.totalCount === 0 && pools.delete(password);
+      setTimeout(async () => {
+        try {
+          if (pool.totalCount === 0) {
+            await pool.end();
+            pools.delete(password);
+            console.log('Old pool ended for password:', password);
+          }
+        } catch (err) {
+          console.error('Error ending old pool:', err);
+        }
+      }, 60000); // Wait for 1 minute to ensure active queries are completed
+    }
+  }
+}
