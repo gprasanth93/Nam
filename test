@@ -74,6 +74,7 @@ triggers AS (
     GROUP BY t.tgname, n.nspname, c.relowner, t.oid, r.rolname
 )
 SELECT * FROM functions_procedures
+
 UNION ALL
 SELECT * FROM triggers
 ORDER BY last_modified_at DESC NULLS LAST, created_at DESC NULLS LAST;
