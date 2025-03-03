@@ -90,5 +90,5 @@ BEGIN
     ';
 
     -- Execute the dynamically built query
-    EXECUTE query;
+    EXECUTE IMMEDIATE query;
 END $$;
