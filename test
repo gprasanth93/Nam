@@ -7,6 +7,12 @@ WITH version_check AS (
     FROM pg_settings 
     WHERE name = 'server_version_num'
 ),
+column_check AS (
+    SELECT COUNT(*) > 0 AS has_procreated
+    FROM pg_attribute 
+    WHERE attrelid = 'pg_proc'::regclass 
+    AND attname IN ('procreated', 'promodified')
+),
 functions_procedures AS (
     SELECT 
         p.proname AS object_name,  -- Function or Procedure Name
@@ -28,13 +34,13 @@ functions_procedures AS (
         p.proisstrict AS is_strict,  -- Is Function Strict?
         p.prosecdef AS security_definer,  -- Security Definer (Executes with Owner Privileges)
         p.proparallel AS parallel_mode,  -- Parallel Execution Mode
-        -- Use procreated and promodified only if PostgreSQL version is 16+
+        -- Dynamically Include procreated and promodified if PostgreSQL version >=16
         CASE 
-            WHEN (SELECT use_procreated FROM version_check) THEN p.procreated 
+            WHEN (SELECT has_procreated FROM column_check) THEN p.procreated 
             ELSE NULL 
         END AS created_at,  -- Function Creation Time (PostgreSQL 16+)
         CASE 
-            WHEN (SELECT use_procreated FROM version_check) THEN p.promodified 
+            WHEN (SELECT has_procreated FROM column_check) THEN p.promodified 
             ELSE NULL 
         END AS last_modified_at  -- Last Modified Time (PostgreSQL 16+)
     FROM pg_proc p
@@ -48,7 +54,7 @@ triggers AS (
         t.tgname AS object_name,  -- Trigger Name
         n.nspname AS schema_name,  -- Schema Name
         'N/A' AS return_type,  -- Triggers do not have return types
-        string_agg(a.attname, ', ') AS arguments,  -- Trigger Arguments (Columns Involved)
+        string_agg(a.attname, ', ') AS arguments,
         'TRIGGER' AS object_type,  -- Object Type (Trigger)
         r.rolname AS owner,  -- Owner of the Trigger
         NULL AS language,  -- Triggers do not have languages
