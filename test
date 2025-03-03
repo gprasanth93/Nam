@@ -1,55 +1,74 @@
-WITH functions_procedures AS (
+WITH version_check AS (
     SELECT 
-        p.proname AS object_name,
-        n.nspname AS schema_name,
-        pg_catalog.pg_get_function_result(p.oid) AS return_type,
-        pg_catalog.pg_get_function_arguments(p.oid) AS arguments,
+        CASE 
+            WHEN setting::int >= 160000 THEN TRUE 
+            ELSE FALSE 
+        END AS use_procreated
+    FROM pg_settings 
+    WHERE name = 'server_version_num'
+),
+functions_procedures AS (
+    SELECT 
+        p.proname AS object_name,  -- Function or Procedure Name
+        n.nspname AS schema_name,  -- Schema Name
+        pg_catalog.pg_get_function_result(p.oid) AS return_type,  -- Function Return Type
+        pg_catalog.pg_get_function_arguments(p.oid) AS arguments,  -- Function Arguments
         CASE 
             WHEN p.prokind = 'f' THEN 'FUNCTION'
             WHEN p.prokind = 'p' THEN 'PROCEDURE'
             ELSE 'OTHER'
-        END AS object_type,
-        p.proowner::regrole AS owner,
-        p.prolang::regtype AS language,
-        p.prosrc AS definition,
-        p.proacl AS privileges,
-        pg_catalog.obj_description(p.oid, 'pg_proc') AS description,
-        p.probin AS binary_path,
-        p.provolatile AS volatility,
-        p.proisstrict AS is_strict,
-        p.prosecdef AS security_definer,
-        p.proparallel AS parallel_mode,
-        p.procreated AS created_at,   -- Creation Time (PostgreSQL 14+)
-        p.promodified AS last_modified_at -- Last Modified Time (PostgreSQL 14+)
+        END AS object_type,  -- Object Type (Function/Procedure)
+        r.rolname AS owner,  -- Owner Name
+        l.lanname AS language,  -- Language of the Function/Procedure
+        p.prosrc AS definition,  -- Function Definition (Source Code)
+        p.proacl AS privileges,  -- Access Privileges
+        pg_catalog.obj_description(p.oid, 'pg_proc') AS description,  -- Function Description
+        p.probin AS binary_path,  -- Binary Path (if applicable)
+        p.provolatile AS volatility,  -- Function Volatility (immutable/stable/volatile)
+        p.proisstrict AS is_strict,  -- Is Function Strict?
+        p.prosecdef AS security_definer,  -- Security Definer (Executes with Owner Privileges)
+        p.proparallel AS parallel_mode,  -- Parallel Execution Mode
+        -- Use procreated and promodified only if PostgreSQL version is 16+
+        CASE 
+            WHEN (SELECT use_procreated FROM version_check) THEN p.procreated 
+            ELSE NULL 
+        END AS created_at,  -- Function Creation Time (PostgreSQL 16+)
+        CASE 
+            WHEN (SELECT use_procreated FROM version_check) THEN p.promodified 
+            ELSE NULL 
+        END AS last_modified_at  -- Last Modified Time (PostgreSQL 16+)
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') -- Exclude system schemas
+    JOIN pg_roles r ON p.proowner = r.oid  -- Fetch Human-Readable Owner Name
+    JOIN pg_language l ON p.prolang = l.oid  -- Fetch Language Name
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')  -- Exclude System Schemas
 ),
 triggers AS (
     SELECT 
-        t.tgname AS object_name,
-        n.nspname AS schema_name,
-        'N/A' AS return_type,
-        string_agg(a.attname, ', ') AS arguments, -- Columns involved in the trigger
-        'TRIGGER' AS object_type,
-        c.relowner::regrole AS owner,
-        NULL AS language,
-        pg_get_triggerdef(t.oid) AS definition,
-        NULL AS privileges,
-        pg_catalog.obj_description(t.oid, 'pg_trigger') AS description,
-        NULL AS binary_path,
-        NULL AS volatility,
-        NULL AS is_strict,
-        NULL AS security_definer,
-        NULL AS parallel_mode,
-        NULL AS created_at,
-        NULL AS last_modified_at
+        t.tgname AS object_name,  -- Trigger Name
+        n.nspname AS schema_name,  -- Schema Name
+        'N/A' AS return_type,  -- Triggers do not have return types
+        string_agg(a.attname, ', ') AS arguments,  -- Trigger Arguments (Columns Involved)
+        'TRIGGER' AS object_type,  -- Object Type (Trigger)
+        r.rolname AS owner,  -- Owner of the Trigger
+        NULL AS language,  -- Triggers do not have languages
+        pg_get_triggerdef(t.oid) AS definition,  -- Trigger Definition
+        NULL AS privileges,  -- Privileges (Triggers don’t have this)
+        pg_catalog.obj_description(t.oid, 'pg_trigger') AS description,  -- Trigger Description
+        NULL AS binary_path,  -- No Binary Path for Triggers
+        NULL AS volatility,  -- No Volatility for Triggers
+        NULL AS is_strict,  -- No Strictness for Triggers
+        NULL AS security_definer,  -- No Security Definer for Triggers
+        NULL AS parallel_mode,  -- No Parallel Mode for Triggers
+        NULL AS created_at,  -- No Creation Date for Triggers
+        NULL AS last_modified_at  -- No Last Modified Date for Triggers
     FROM pg_trigger t
     JOIN pg_class c ON t.tgrelid = c.oid
     JOIN pg_namespace n ON c.relnamespace = n.oid
+    JOIN pg_roles r ON c.relowner = r.oid  -- Fetch Human-Readable Owner Name
     LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(t.tgattr)
-    WHERE NOT t.tgisinternal -- Exclude system triggers
-    GROUP BY t.tgname, n.nspname, c.relowner, t.oid
+    WHERE NOT t.tgisinternal  -- Exclude Internal/System Triggers
+    GROUP BY t.tgname, n.nspname, c.relowner, t.oid, r.rolname
 )
 SELECT * FROM functions_procedures
 UNION ALL
