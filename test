@@ -1,99 +1,57 @@
-const { Client, Pool } = require('pg');
-
-// Initial PostgreSQL client configuration
-let pgConfig = {
-  user: 'u4389556_validation_db',
-  host: 'gb125068317.systems.uk.hsbc',
-  database: 'u4389556_validation_db',
-  password: 'tsjn2048kdtcssahdw3jn',
-  port: 19713,
-};
-
-// Active pools mapped to their passwords
-const pools = new Map();
-let currentPassword = pgConfig.password;
-
-// Create a PostgreSQL client
-const client = new Client(pgConfig);
-
-// Connect to the PostgreSQL server
-client.connect();
-
-// Listen for notifications on a specific channel
-client.query('LISTEN pgmaker_channel');
-
-// Function to create a new pool
-function createNewPool(password) {
-  const config = { ...pgConfig, password };
-  const newPool = new Pool(config);
-  pools.set(password, newPool);
-  return newPool;
-}
-
-// Create the initial pool
-createNewPool(pgConfig.password);
-
-// Handle notifications
-client.on('notification', async (msg) => {
-  console.log('Received notification:', msg);
-
-  const payload = JSON.parse(msg.payload);
-
-  if (payload.eventType === 'authorization') {
-    console.log('Password updated:', payload.password);
-
-    const newPassword = payload.password;
-
-    // Check if the new password is already active
-    if (pools.has(newPassword)) {
-      console.log('Pool with the new password already exists.');
-      return;
-    }
-
-    // Update the global config and create a new pool
-    pgConfig.password = newPassword;
-    currentPassword = newPassword;
-    createNewPool(newPassword);
-
-    // Schedule the cleanup of old pools
-    cleanUpOldPools();
-  }
-});
-
-// Function to query the database
-async function queryDatabase(queryText, params) {
-  try {
-    const pool = pools.get(currentPassword);
-    const client = await pool.connect();
-
-    try {
-      const res = await client.query(queryText, params);
-      return res;
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    console.error('Database query error:', err);
-    throw err;
-  }
-}
-
-// Function to clean up old pools
-function cleanUpOldPools() {
-  for (const [password, pool] of pools.entries()) {
-    if (password !== currentPassword) {
-      pool.totalCount === 0 && pools.delete(password);
-      setTimeout(async () => {
-        try {
-          if (pool.totalCount === 0) {
-            await pool.end();
-            pools.delete(password);
-            console.log('Old pool ended for password:', password);
-          }
-        } catch (err) {
-          console.error('Error ending old pool:', err);
-        }
-      }, 60000); // Wait for 1 minute to ensure active queries are completed
-    }
-  }
-}
+WITH functions_procedures AS (
+    SELECT 
+        p.proname AS object_name,
+        n.nspname AS schema_name,
+        pg_catalog.pg_get_function_result(p.oid) AS return_type,
+        pg_catalog.pg_get_function_arguments(p.oid) AS arguments,
+        CASE 
+            WHEN p.prokind = 'f' THEN 'FUNCTION'
+            WHEN p.prokind = 'p' THEN 'PROCEDURE'
+            ELSE 'OTHER'
+        END AS object_type,
+        p.proowner::regrole AS owner,
+        p.prolang::regtype AS language,
+        p.prosrc AS definition,
+        p.proacl AS privileges,
+        pg_catalog.obj_description(p.oid, 'pg_proc') AS description,
+        p.probin AS binary_path,
+        p.provolatile AS volatility,
+        p.proisstrict AS is_strict,
+        p.prosecdef AS security_definer,
+        p.proparallel AS parallel_mode,
+        p.procreated AS created_at,   -- Creation Time (PostgreSQL 14+)
+        p.promodified AS last_modified_at -- Last Modified Time (PostgreSQL 14+)
+    FROM pg_proc p
+    JOIN pg_namespace n ON p.pronamespace = n.oid
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') -- Exclude system schemas
+),
+triggers AS (
+    SELECT 
+        t.tgname AS object_name,
+        n.nspname AS schema_name,
+        'N/A' AS return_type,
+        string_agg(a.attname, ', ') AS arguments, -- Columns involved in the trigger
+        'TRIGGER' AS object_type,
+        c.relowner::regrole AS owner,
+        NULL AS language,
+        pg_get_triggerdef(t.oid) AS definition,
+        NULL AS privileges,
+        pg_catalog.obj_description(t.oid, 'pg_trigger') AS description,
+        NULL AS binary_path,
+        NULL AS volatility,
+        NULL AS is_strict,
+        NULL AS security_definer,
+        NULL AS parallel_mode,
+        NULL AS created_at,
+        NULL AS last_modified_at
+    FROM pg_trigger t
+    JOIN pg_class c ON t.tgrelid = c.oid
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(t.tgattr)
+    WHERE NOT t.tgisinternal -- Exclude system triggers
+    GROUP BY t.tgname, n.nspname, c.relowner, t.oid
+)
+SELECT * FROM functions_procedures
+UNION ALL
+SELECT * FROM triggers
+ORDER BY last_modified_at DESC NULLS LAST, created_at DESC NULLS LAST;
