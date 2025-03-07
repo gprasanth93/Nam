@@ -1,184 +1,39 @@
-# postgresql.conf.template
+const supervisorConnection = new Proxy({}, {
+    set: (target, property, value) => {
+        console.log(`set ${property} to ${util.inspect(value, { depth: null })}`);
+        
+        let shouldEmit = false;
 
-listen_addresses = '*'
-port = 5432
+        // Ensure the property exists
+        if (!target[property]) {
+            target[property] = {};
+            shouldEmit = true; // Emit when a new entry is created
+        }
 
-# Connections
-max_connections = __MAX_CONNECTIONS__
+        // Replace dbState if it exists in value
+        if (value.dbState) {
+            const isDbStateChanged = JSON.stringify(target[property].dbState) !== JSON.stringify(value.dbState);
+            target[property].dbState = value.dbState;
+            if (isDbStateChanged) shouldEmit = true;
+        }
 
-# Memory
-shared_buffers = __SHARED_BUFFERS__
-work_mem = __WORK_MEM__
-effective_cache_size = __EFFECTIVE_CACHE_SIZE__
+        // Replace kvmState if it exists in value
+        if (value.kvmState) {
+            const isKvmStateChanged = JSON.stringify(target[property].kvmState) !== JSON.stringify(value.kvmState);
+            target[property].kvmState = value.kvmState;
+            if (isKvmStateChanged) shouldEmit = true;
+        }
 
-# WAL
-wal_level = replica
-synchronous_commit = on
-checkpoint_timeout = 5min
-max_wal_size = 1GB
-min_wal_size = 80MB
+        if (shouldEmit) {
+            supervisorEmitter.emit('update', { [property]: target[property] });
+        }
 
-# Logging
-logging_collector = on
-log_directory = 'log'
-log_filename = 'postgresql-%Y-%m-%d_%H%M%S.log'
-log_rotation_age = 1d
-log_rotation_size = 10MB
+        console.log(`supervisorConnection ${util.inspect(supervisorConnection, { depth: null })}`);
+        
+        return true;
+    },
 
-# Autovacuum
-autovacuum = on
-autovacuum_naptime = 60s
-
-# Resource Usage
-effective_io_concurrency = __EFFECTIVE_IO_CONCURRENCY__
-
-# Parallelism
-max_parallel_workers_per_gather = 2
-max_parallel_workers = __MAX_PARALLEL_WORKERS__
-
-
-
-
-
-#!/usr/bin/env node
-'use strict';
-
-const fs = require('fs');
-const path = require('path');
-
-/**
- * Dynamically update PostgreSQL config.
- *
- * @param {Object} options
- * @param {number} [options.memoryMB]      - VM memory in MB
- * @param {number} [options.cpuCores]      - VM CPU cores
- * @param {number} [options.netRate]       - Network rate (e.g. Mbps)
- * @param {number} [options.diskRate]      - Disk I/O rate (e.g. MB/s)
- * @param {string} options.templatePath    - Path to postgresql.conf template
- * @param {string} options.outputPath      - Path to write the final postgresql.conf
- */
-function updatePostgresConfig(options) {
-  const {
-    memoryMB,
-    cpuCores,
-    netRate,
-    diskRate,
-    templatePath,
-    outputPath
-  } = options;
-
-  // 1. Read the template
-  let template;
-  try {
-    template = fs.readFileSync(path.resolve(templatePath), 'utf8');
-  } catch (err) {
-    throw new Error(`Could not read template file: ${err.message}`);
-  }
-
-  // 2. Provide basic defaults for placeholders
-  //    (used if no VM details are passed)
-  let defaultSharedBuffersMB = 128;
-  let defaultEffectiveCacheSizeMB = 256;
-  let defaultWorkMemMB = 4;
-  let defaultMaxConnections = 50;
-  let defaultEffectiveIoConcurrency = 1;
-  let defaultMaxParallelWorkers = 2;
-
-  // 3. Update defaults based on VM details (if provided)
-  // 3.1 Memory-based
-  if (memoryMB && memoryMB > 0) {
-    // Example: shared_buffers = 25% of memory (but min 128MB)
-    defaultSharedBuffersMB = Math.max(Math.floor(memoryMB / 4), 128);
-
-    // effective_cache_size = ~50% of memory (but min 256MB)
-    defaultEffectiveCacheSizeMB = Math.max(Math.floor(memoryMB / 2), 256);
-
-    // Adjust work_mem if memory is large
-    if (memoryMB > 1024) {
-      defaultWorkMemMB = 8;  // or more, if you want
+    get: (target, property) => {
+        return target[property];
     }
-    if (memoryMB > 4096) {
-      defaultWorkMemMB = 16;
-    }
-  }
-
-  // 3.2 CPU-based
-  if (cpuCores && cpuCores > 0) {
-    // max_connections = 10 * cpuCores (minimum 50)
-    defaultMaxConnections = Math.max(cpuCores * 10, 50);
-
-    // parallel workers
-    if (cpuCores >= 4) defaultMaxParallelWorkers = 4;
-    if (cpuCores >= 8) defaultMaxParallelWorkers = 8;
-  }
-
-  // 3.3 Disk-based
-  //    (If diskRate is high => we can allow higher concurrency)
-  if (diskRate && diskRate > 0) {
-    if (diskRate < 50) {
-      defaultEffectiveIoConcurrency = 1;
-    } else if (diskRate < 200) {
-      defaultEffectiveIoConcurrency = 2;
-    } else if (diskRate < 500) {
-      defaultEffectiveIoConcurrency = 4;
-    } else {
-      defaultEffectiveIoConcurrency = 8;
-    }
-  }
-
-  // 4. Replace placeholders in the template
-  template = template
-    .replace(/__SHARED_BUFFERS__/g, `${defaultSharedBuffersMB}MB`)
-    .replace(/__EFFECTIVE_CACHE_SIZE__/g, `${defaultEffectiveCacheSizeMB}MB`)
-    .replace(/__WORK_MEM__/g, `${defaultWorkMemMB}MB`)
-    .replace(/__MAX_CONNECTIONS__/g, `${defaultMaxConnections}`)
-    .replace(/__EFFECTIVE_IO_CONCURRENCY__/g, `${defaultEffectiveIoConcurrency}`)
-    .replace(/__MAX_PARALLEL_WORKERS__/g, `${defaultMaxParallelWorkers}`);
-
-  // 5. Write the updated file
-  try {
-    fs.writeFileSync(path.resolve(outputPath), template, 'utf8');
-    console.log(`PostgreSQL config written to: ${outputPath}`);
-  } catch (err) {
-    throw new Error(`Could not write updated config file: ${err.message}`);
-  }
-}
-
-module.exports = { updatePostgresConfig };
-
-
-
-
-
-#!/usr/bin/env node
-'use strict';
-
-const path = require('path');
-const { updatePostgresConfig } = require('./postgresConfigGenerator');
-
-async function main() {
-  // Example: these values might come from your Firecracker VM provisioning logic
-  const memoryMB = 2048;   // 2 GB
-  const cpuCores = 2;
-  const netRate = 100;     // 100 Mbps
-  const diskRate = 300;    // 300 MB/s
-
-  // Paths
-  const templatePath = path.join(__dirname, 'postgresql.conf.template');
-  const outputPath = path.join(__dirname, 'postgresql.conf');
-
-  // Generate config
-  updatePostgresConfig({
-    memoryMB,
-    cpuCores,
-    netRate,
-    diskRate,
-    templatePath,
-    outputPath
-  });
-}
-
-main().catch((err) => {
-  console.error('Error:', err);
-  process.exit(1);
 });
