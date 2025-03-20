@@ -1,39 +1,212 @@
-const supervisorConnection = new Proxy({}, {
-    set: (target, property, value) => {
-        console.log(`set ${property} to ${util.inspect(value, { depth: null })}`);
-        
-        let shouldEmit = false;
+#!/bin/bash
+# Usage: socat_wrapper.sh <hostPort> <targetIp> <targetPort> <databaseName>
+HOST_PORT=$1
+TARGET_IP=$2
+TARGET_PORT=$3
+DATABASE_NAME=$4
 
-        // Ensure the property exists
-        if (!target[property]) {
-            target[property] = {};
-            shouldEmit = true; // Emit when a new entry is created
-        }
+# Start socat in the background.
+socat TCP-LISTEN:${HOST_PORT},fork,reuseaddr TCP:${TARGET_IP}:${TARGET_PORT} &
+child_pid=$!
 
-        // Replace dbState if it exists in value
-        if (value.dbState) {
-            const isDbStateChanged = JSON.stringify(target[property].dbState) !== JSON.stringify(value.dbState);
-            target[property].dbState = value.dbState;
-            if (isDbStateChanged) shouldEmit = true;
-        }
+# Keep the wrapper running so that the command line remains visible (and includes the databaseName tag).
+wait $child_pid
 
-        // Replace kvmState if it exists in value
-        if (value.kvmState) {
-            const isKvmStateChanged = JSON.stringify(target[property].kvmState) !== JSON.stringify(value.kvmState);
-            target[property].kvmState = value.kvmState;
-            if (isKvmStateChanged) shouldEmit = true;
-        }
 
-        if (shouldEmit) {
-            supervisorEmitter.emit('update', { [property]: target[property] });
-        }
 
-        console.log(`supervisorConnection ${util.inspect(supervisorConnection, { depth: null })}`);
-        
-        return true;
-    },
+const express = require('express');
+const { spawn, exec } = require('child_process');
+const path = require('path');
+const bodyParser = require('body-parser');
 
-    get: (target, property) => {
-        return target[property];
+const app = express();
+const serverPort = 3000;
+
+// Middleware to parse JSON bodies.
+app.use(bodyParser.json());
+
+// Initial KVM configurations.
+const kvmConfigs = [
+  { hostPort: 8001, targetIp: '192.168.122.101', targetPort: 22, databaseName: 'db1' },
+  { hostPort: 8002, targetIp: '192.168.122.102', targetPort: 22, databaseName: 'db2' }
+];
+
+/**
+ * List running socat wrapper processes by executing a 'ps' command and parsing the output.
+ * Expected command line format for the wrapper:
+ *   socat_wrapper.sh <hostPort> <targetIp> <targetPort> <databaseName>
+ *
+ * @param {Function} callback - Callback invoked with (error, processes).
+ */
+function listSocatProcesses(callback) {
+  exec('ps -eo pid,command', (error, stdout, stderr) => {
+    if (error) {
+      console.error(`Error executing ps: ${error}`);
+      return callback(error);
     }
+    const lines = stdout.split('\n');
+    const socatProcesses = [];
+
+    lines.forEach(line => {
+      if (line.includes('socat_wrapper.sh')) {
+        // Example expected line:
+        // "12345 /path/to/socat_wrapper.sh 8001 192.168.122.101 22 db1"
+        const match = line.match(/^\s*(\d+).*socat_wrapper\.sh\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)/);
+        if (match) {
+          socatProcesses.push({
+            pid: parseInt(match[1], 10),
+            hostPort: parseInt(match[2], 10),
+            targetIp: match[3],
+            targetPort: parseInt(match[4], 10),
+            databaseName: match[5],
+            fullCommand: line.trim()
+          });
+        }
+      }
+    });
+    callback(null, socatProcesses);
+  });
+}
+
+/**
+ * Add a new socat process using the wrapper script.
+ * Before spawning a new process, check if a process with the same databaseName already exists.
+ *
+ * @param {Object} config - Object with hostPort, targetIp, targetPort, and databaseName.
+ * @param {Function} callback - Callback invoked with (error, result).
+ */
+function addSocatProcess(config, callback) {
+  // Check if a process with the same databaseName is already running.
+  listSocatProcesses((err, processes) => {
+    if (err) {
+      console.error('Error listing socat processes:', err);
+      return callback(err);
+    }
+
+    const exists = processes.find(proc => proc.databaseName === config.databaseName);
+    if (exists) {
+      console.log(`Socat process already running for databaseName: ${config.databaseName}. Skipping.`);
+      return callback(null, { message: 'Process already running', config });
+    }
+
+    // Process not found; start a new one.
+    const wrapperPath = path.join(__dirname, 'socat_wrapper.sh');
+    const args = [
+      config.hostPort,
+      config.targetIp,
+      config.targetPort,
+      config.databaseName
+    ];
+
+    const proc = spawn(wrapperPath, args, {
+      detached: true,
+      stdio: 'ignore'
+    });
+    proc.unref();
+
+    console.log(`Started socat wrapper: Host Port ${config.hostPort} -> ${config.targetIp}:${config.targetPort} with databaseName: ${config.databaseName}`);
+    return callback(null, { message: 'Process started', config });
+  });
+}
+
+/**
+ * Stop (kill) socat wrapper processes that match the given databaseName.
+ *
+ * @param {string} databaseName - The tag used when starting the socat process.
+ * @param {Function} callback - Callback invoked with (error, result).
+ */
+function stopSocatProcess(databaseName, callback) {
+  listSocatProcesses((err, processes) => {
+    if (err) return callback(err);
+
+    const procsToKill = processes.filter(proc => proc.databaseName === databaseName);
+    if (procsToKill.length === 0) {
+      return callback(new Error(`No socat process found with databaseName: ${databaseName}`));
+    }
+
+    let killErrors = [];
+    let killCount = 0;
+    procsToKill.forEach(proc => {
+      exec(`kill ${proc.pid}`, (err) => {
+        killCount++;
+        if (err) {
+          killErrors.push(`Failed to kill process ${proc.pid}: ${err.message}`);
+        } else {
+          console.log(`Killed socat process with PID ${proc.pid} for databaseName: ${databaseName}`);
+        }
+        if (killCount === procsToKill.length) {
+          if (killErrors.length > 0) {
+            return callback(new Error(killErrors.join('; ')));
+          } else {
+            return callback(null, { message: `Stopped ${killCount} process(es) with databaseName: ${databaseName}` });
+          }
+        }
+      });
+    });
+  });
+}
+
+/**
+ * Initialize socat processes for all initial KVM configurations.
+ */
+function initializeSocatProcesses() {
+  kvmConfigs.forEach(config => {
+    addSocatProcess(config, (err, result) => {
+      if (err) {
+        console.error(`Error initializing process for ${config.databaseName}: ${err.message}`);
+      } else {
+        console.log(result.message, result.config);
+      }
+    });
+  });
+}
+
+// Initialize on startup.
+initializeSocatProcesses();
+
+/* ===== HTTP Endpoints ===== */
+
+// List all socat mappings (wrapper processes).
+app.get('/socat-mappings', (req, res) => {
+  listSocatProcesses((err, processes) => {
+    if (err) {
+      return res.status(500).json({ error: 'Failed to list socat processes' });
+    }
+    res.json(processes);
+  });
+});
+
+// Add a new socat process (e.g., when a new KVM is created).
+// Expect JSON body with: { hostPort, targetIp, targetPort, databaseName }
+app.post('/socat-add', (req, res) => {
+  const { hostPort, targetIp, targetPort, databaseName } = req.body;
+  if (!hostPort || !targetIp || !targetPort || !databaseName) {
+    return res.status(400).json({ error: 'Missing required parameters.' });
+  }
+  addSocatProcess({ hostPort, targetIp, targetPort, databaseName }, (err, result) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(result);
+  });
+});
+
+// Stop a socat process (e.g., when a KVM is removed).
+// Expect JSON body with: { databaseName }
+app.delete('/socat-remove', (req, res) => {
+  const { databaseName } = req.body;
+  if (!databaseName) {
+    return res.status(400).json({ error: 'Missing databaseName parameter.' });
+  }
+  stopSocatProcess(databaseName, (err, result) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json(result);
+  });
+});
+
+// Start the Express server.
+app.listen(serverPort, () => {
+  console.log(`Server is running on port ${serverPort}`);
 });
