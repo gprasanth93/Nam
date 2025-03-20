@@ -1,1 +1,30 @@
-line.match(/^\s*(\d+).*TCP-LISTEN:(\d+).*TCP:([\d.]+):(\d+).*--tag:(\S+)/);
+#!/bin/bash
+# Usage: socat_wrapper.sh <hostPort> <targetIp> <targetPort> <databaseName>
+HOST_PORT=$1
+TARGET_IP=$2
+TARGET_PORT=$3
+DATABASE_NAME=$4
+
+# Create a unique log file for each instance, e.g. /tmp/socat_8001_db1_1689963778.log
+TIMESTAMP=$(date +%s)
+LOGFILE="/tmp/socat_${HOST_PORT}_${DATABASE_NAME}_${TIMESTAMP}.log"
+
+# Print startup info to the log.
+echo "[`date`] Starting wrapper with arguments: $@" >> "$LOGFILE"
+echo "[`date`] hostPort=$HOST_PORT, targetIp=$TARGET_IP, targetPort=$TARGET_PORT, databaseName=$DATABASE_NAME" >> "$LOGFILE"
+
+# Run socat in the background, sending all output to the log file.
+# Use 'nohup' so that socat ignores SIGHUP and can keep running if the parent exits.
+nohup socat \
+  TCP-LISTEN:${HOST_PORT},fork,reuseaddr \
+  TCP:${TARGET_IP}:${TARGET_PORT} \
+  >> "$LOGFILE" 2>&1 &
+
+child_pid=$!
+echo "[`date`] Socat started with PID $child_pid" >> "$LOGFILE"
+
+# Instead of `read -r _`, use an infinite loop to prevent this script from exiting.
+# That way, you'll see the wrapper process in `ps` along with these arguments.
+while true; do
+  sleep 60
+done
