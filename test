@@ -1,103 +1,99 @@
-#!/bin/bash
-# Usage: socat_wrapper.sh <hostPort> <targetIp> <targetPort> <databaseName> <logPath>
-HOST_PORT=$1
-TARGET_IP=$2
-TARGET_PORT=$3
-DATABASE_NAME=$4
-LOG_PATH=$5
-
-# If logPath doesn't exist, create it (remove this if you want to manage logs manually).
-mkdir -p "$LOG_PATH"
-
-# Generate a unique log file name, e.g. /var/log/socat/socat_8001_db1_1690000000.log
-TIMESTAMP=$(date +%s)
-LOGFILE="${LOG_PATH}/socat_${HOST_PORT}_${DATABASE_NAME}_${TIMESTAMP}.log"
-
-# Log some debug info about the script invocation.
-echo "[`date`] socat_wrapper.sh invoked with arguments: $@" >> "$LOGFILE"
-echo "[`date`] hostPort=$HOST_PORT, targetIp=$TARGET_IP, targetPort=$TARGET_PORT, databaseName=$DATABASE_NAME, logPath=$LOG_PATH" >> "$LOGFILE"
-
-# Start socat in the background with nohup so it ignores SIGHUP.
-nohup socat \
-  TCP-LISTEN:${HOST_PORT},fork,reuseaddr \
-  TCP:${TARGET_IP}:${TARGET_PORT} \
-  >> "$LOGFILE" 2>&1 &
-
-child_pid=$!
-echo "[`date`] Socat started with PID $child_pid" >> "$LOGFILE"
-
-# Keep the wrapper script alive (infinite loop) so the process remains visible in `ps`.
-while true; do
-  sleep 60
-done
-
-
-
-const listSocatProcesses = async () => {
-  const { stdout } = await execPromise('ps -eo pid,command');
-  const lines = stdout.split('\n');
-  const results = [];
-  for (const line of lines) {
-    if (line.includes('socat_wrapper.sh')) {
-      // Example line: "12345 /path/to/socat_wrapper.sh 8001 192.168.122.101 22 db1 /var/log/socat"
-      const match = line.match(/^\s*(\d+).*socat_wrapper\.sh\s+(\d+)\s+([\d.]+)\s+(\d+)\s+(\S+)\s+(\S+)/);
-      // Explanation:
-      //   1 => PID
-      //   2 => hostPort
-      //   3 => targetIp
-      //   4 => targetPort
-      //   5 => databaseName
-      //   6 => logPath
-      if (match) {
-        results.push({
-          pid: parseInt(match[1], 10),
-          hostPort: parseInt(match[2], 10),
-          targetIp: match[3],
-          targetPort: parseInt(match[4], 10),
-          databaseName: match[5],
-          logPath: match[6],
-          fullCommand: line.trim()
-        });
-      }
-    }
-  }
-  return results;
-};
-
+#!/usr/bin/env node
 /**
- * Start a new socat process using the wrapper, unless one with the same databaseName is already running.
+ * Usage: node socar_wrapper.js <hostPort> <targetIp> <targetPort> <databaseName> <logPath>
+ *
+ * Example:
+ *   node socar_wrapper.js 8001 192.168.122.101 22 db1 /var/log/socar
+ *
+ * This script:
+ *  - Listens on <hostPort>
+ *  - Forwards all TCP traffic to <targetIp>:<targetPort>
+ *  - Writes logs to <logPath>/socar_<hostPort>_<databaseName>_<timestamp>.log
+ *  - Remains running indefinitely until killed (e.g., kill <pid>).
  */
-const addSocatProcess = async (config) => {
-  const { hostPort, targetIp, targetPort, databaseName, logPath } = config;
-  // Check if already running for this databaseName.
-  const processes = await listSocatProcesses();
-  const exists = processes.find(proc => proc.databaseName === databaseName);
-  if (exists) {
-    console.log(`[INFO] Socat process already running for ${databaseName}. Skipping.`);
-    return { message: 'Process already running', config };
-  }
 
-  // Path to wrapper script.
-  const wrapperPath = path.join(__dirname, 'socat_wrapper.sh');
-  // Build arguments: hostPort, targetIp, targetPort, databaseName, logPath
-  const args = [hostPort, targetIp, targetPort, databaseName, logPath];
+const net = require('net');
+const fs = require('fs');
+const path = require('path');
 
-  console.log(`[INFO] Spawning wrapper with args: ${args.join(' ')}`);
+// Extract CLI arguments
+const [,, hostPort, targetIp, targetPort, databaseName, logPathArg] = process.argv;
 
-  // Spawn in detached mode so Node.js doesn't keep it alive or kill it on exit.
-  const proc = spawn(wrapperPath, args, {
-    detached: true,
-    stdio: 'ignore'
+if (!hostPort || !targetIp || !targetPort || !databaseName || !logPathArg) {
+  console.error('Usage: node socar_wrapper.js <hostPort> <targetIp> <targetPort> <databaseName> <logPath>');
+  process.exit(1);
+}
+
+// Convert numeric arguments
+const localPort = parseInt(hostPort, 10);
+const remotePort = parseInt(targetPort, 10);
+
+// Ensure the log directory exists (recursive: true for nested paths)
+try {
+  fs.mkdirSync(logPathArg, { recursive: true });
+} catch (err) {
+  console.error(`Failed to create log directory "${logPathArg}":`, err);
+  process.exit(1);
+}
+
+// Generate a unique log file name
+const timestamp = Date.now();
+const logFile = path.join(logPathArg, `socar_${hostPort}_${databaseName}_${timestamp}.log`);
+
+// Simple helper to log to file + stdout
+function log(msg) {
+  const line = `[${new Date().toISOString()}] ${msg}\n`;
+  fs.appendFileSync(logFile, line);
+  console.log(line.trim());
+}
+
+log(`socar_wrapper.js invoked with arguments:
+  hostPort=${hostPort},
+  targetIp=${targetIp},
+  targetPort=${targetPort},
+  databaseName=${databaseName},
+  logPath=${logPathArg}`);
+log(`Log file: ${logFile}`);
+
+// Create a TCP server to forward traffic
+const server = net.createServer((clientSocket) => {
+  log(`New inbound connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
+
+  // Connect to the remote target
+  const remoteSocket = net.connect(remotePort, targetIp, () => {
+    log(`Forwarding local:${localPort} -> ${targetIp}:${remotePort} (db=${databaseName})`);
   });
 
-  // Catch spawn errors (e.g. permissions).
-  proc.on('error', (err) => {
-    console.error(`[ERROR] Failed to spawn wrapper: ${err.message}`);
+  // Pipe data in both directions
+  clientSocket.pipe(remoteSocket).pipe(clientSocket);
+
+  // Error handling
+  clientSocket.on('error', (err) => {
+    log(`Client socket error: ${err.message}`);
   });
+  remoteSocket.on('error', (err) => {
+    log(`Remote socket error: ${err.message}`);
+  });
+});
 
-  // Let the child live independently of this parent process.
-  proc.unref();
+// Start listening
+server.listen(localPort, '0.0.0.0', () => {
+  log(`Listening on port ${localPort}, forwarding to ${targetIp}:${remotePort}, db=${databaseName}`);
+});
 
-  console.log(`[INFO] Started socat wrapper: HostPort=${hostPort}, DB=${databaseName}, LogPath=${logPath}`);
-  return { message: 'Process started', config };
-};
+// Keep the script alive indefinitely by virtue of the open server.
+// Optionally, handle shutdown signals:
+process.on('SIGINT', () => {
+  log('Received SIGINT, shutting down...');
+  server.close(() => {
+    log('Server closed. Exiting.');
+    process.exit(0);
+  });
+});
+process.on('SIGTERM', () => {
+  log('Received SIGTERM, shutting down...');
+  server.close(() => {
+    log('Server closed. Exiting.');
+    process.exit(0);
+  });
+});
