@@ -1,99 +1,56 @@
-#!/usr/bin/env node
-/**
- * Usage: node socar_wrapper.js <hostPort> <targetIp> <targetPort> <databaseName> <logPath>
- *
- * Example:
- *   node socar_wrapper.js 8001 192.168.122.101 22 db1 /var/log/socar
- *
- * This script:
- *  - Listens on <hostPort>
- *  - Forwards all TCP traffic to <targetIp>:<targetPort>
- *  - Writes logs to <logPath>/socar_<hostPort>_<databaseName>_<timestamp>.log
- *  - Remains running indefinitely until killed (e.g., kill <pid>).
- */
+Introducing our new series: PgMaker KVM Insights. Over the coming weeks, we’ll walk you through how we’ve architected PgMaker to provision PostgreSQL databases inside KVM virtual machines—combining enterprise-grade reliability with developer-friendly agility. In this inaugural post, we’ll cover the big picture: why KVM, how it works at a high level, and what this means for you.
 
-const net = require('net');
-const fs = require('fs');
-const path = require('path');
+The “Why” Behind KVM-Powered Databases
+Guaranteed Resource Isolation
+Every database gets its own VM caged with strict CPU, memory, and disk quotas. That means no more “noisy neighbor” incidents—your workloads stay predictable, even when someone else runs a heavy report.
 
-// Extract CLI arguments
-const [,, hostPort, targetIp, targetPort, databaseName, logPathArg] = process.argv;
+Optimized Utilization
+Virtualization lets us consolidate more databases onto fewer hosts without letting them step on each other’s toes. You only reserve—and pay for—the resources you actually need.
 
-if (!hostPort || !targetIp || !targetPort || !databaseName || !logPathArg) {
-  console.error('Usage: node socar_wrapper.js <hostPort> <targetIp> <targetPort> <databaseName> <logPath>');
-  process.exit(1);
-}
+Built-In Lifecycle Management
+Creating a VM clone, rolling back to a snapshot, or pausing an idle instance is part of the standard KVM toolkit. We’ve baked those capabilities straight into PgMaker, so backups and restores feel as natural as clicking a button.
 
-// Convert numeric arguments
-const localPort = parseInt(hostPort, 10);
-const remotePort = parseInt(targetPort, 10);
+Stronger Security Posture
+Running each database in its own VM adds an extra containment layer. Even if one instance encounters a vulnerability, the others remain insulated.
 
-// Ensure the log directory exists (recursive: true for nested paths)
-try {
-  fs.mkdirSync(logPathArg, { recursive: true });
-} catch (err) {
-  console.error(`Failed to create log directory "${logPathArg}":`, err);
-  process.exit(1);
-}
+PgMaker + KVM: At a Glance
+Golden VM Templates
+Our team maintains hardened images preloaded with your choice of PostgreSQL version, extensions, and optimized OS settings.
 
-// Generate a unique log file name
-const timestamp = Date.now();
-const logFile = path.join(logPathArg, `socar_${hostPort}_${databaseName}_${timestamp}.log`);
+Automated Provisioning
+When you request a new database, PgMaker’s control plane instructs our KVM orchestrator to spin up a fresh VM, configure storage paths, inject your credentials, and register it with our network fabric.
 
-// Simple helper to log to file + stdout
-function log(msg) {
-  const line = `[${new Date().toISOString()}] ${msg}\n`;
-  fs.appendFileSync(logFile, line);
-  console.log(line.trim());
-}
+Seamless Networking
+Each VM receives a dedicated virtual NIC that’s automatically whitelisted in pg_hba.conf and our firewall. Connection details appear instantly in your PgMaker dashboard.
 
-log(`socar_wrapper.js invoked with arguments:
-  hostPort=${hostPort},
-  targetIp=${targetIp},
-  targetPort=${targetPort},
-  databaseName=${databaseName},
-  logPath=${logPathArg}`);
-log(`Log file: ${logFile}`);
+On-the-Fly Scaling
+Need more RAM, CPU, or IOPS? Adjust your VM’s resource allocation live. We’ll migrate it in the background with zero downtime.
 
-// Create a TCP server to forward traffic
-const server = net.createServer((clientSocket) => {
-  log(`New inbound connection from ${clientSocket.remoteAddress}:${clientSocket.remotePort}`);
+Centralized Monitoring
+All VM and database metrics stream into a unified dashboard—so you always have full visibility into performance and capacity.
 
-  // Connect to the remote target
-  const remoteSocket = net.connect(remotePort, targetIp, () => {
-    log(`Forwarding local:${localPort} -> ${targetIp}:${remotePort} (db=${databaseName})`);
-  });
+What’s Changing (Effective This Friday)
+Default to KVM
+As of Friday, all new PgMaker database requests will spin up KVM-based instances by default.
 
-  // Pipe data in both directions
-  clientSocket.pipe(remoteSocket).pipe(clientSocket);
+Bare-Metal by Exception
+If your workload truly needs a bare-metal machine—say, for custom hardware, regulatory constraints, or ultra-low latency—please open a support ticket. In your request, let us know:
 
-  // Error handling
-  clientSocket.on('error', (err) => {
-    log(`Client socket error: ${err.message}`);
-  });
-  remoteSocket.on('error', (err) => {
-    log(`Remote socket error: ${err.message}`);
-  });
-});
+Why KVM doesn’t meet your requirements
 
-// Start listening
-server.listen(localPort, '0.0.0.0', () => {
-  log(`Listening on port ${localPort}, forwarding to ${targetIp}:${remotePort}, db=${databaseName}`);
-});
+Which bare-metal features you need
 
-// Keep the script alive indefinitely by virtue of the open server.
-// Optionally, handle shutdown signals:
-process.on('SIGINT', () => {
-  log('Received SIGINT, shutting down...');
-  server.close(() => {
-    log('Server closed. Exiting.');
-    process.exit(0);
-  });
-});
-process.on('SIGTERM', () => {
-  log('Received SIGTERM, shutting down...');
-  server.close(() => {
-    log('Server closed. Exiting.');
-    process.exit(0);
-  });
-});
+We’ll review and work with you to find the right solution.
+
+What’s Next in PgMaker KVM Insights
+Deep Dive: VM Image Hardening
+
+Storage & Filesystem Best Practices
+
+Network Topologies & High Availability
+
+Disaster Recovery with VM Snapshots
+
+Performance Tuning in Virtualized Environments
+
+We’re thrilled to bring you along on this journey. If you have questions, feedback, or specific topics you’d like us to cover, drop a comment below or reach out to the PgMaker team directly. Here’s to more reliable, scalable, and manageable PostgreSQL deployments!
