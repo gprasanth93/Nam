@@ -1,56 +1,75 @@
-Introducing our new series: PgMaker KVM Insights. Over the coming weeks, we’ll walk you through how we’ve architected PgMaker to provision PostgreSQL databases inside KVM virtual machines—combining enterprise-grade reliability with developer-friendly agility. In this inaugural post, we’ll cover the big picture: why KVM, how it works at a high level, and what this means for you.
+PgMaker KVM Insights — Part 2:
+Development Databases Now Live on KVM
 
-The “Why” Behind KVM-Powered Databases
-Guaranteed Resource Isolation
-Every database gets its own VM caged with strict CPU, memory, and disk quotas. That means no more “noisy neighbor” incidents—your workloads stay predictable, even when someone else runs a heavy report.
+Last Friday, we officially rolled out our first wave of PostgreSQL databases inside KVM virtual machines for development environments. This marks a major milestone for PgMaker as we continue to modernize how databases are provisioned and managed.
 
-Optimized Utilization
-Virtualization lets us consolidate more databases onto fewer hosts without letting them step on each other’s toes. You only reserve—and pay for—the resources you actually need.
+In this post, we’ll walk you through what happens when you request a database today, what’s provisioned by default, and how you can customize your KVM instance if you need more resources.
 
-Built-In Lifecycle Management
-Creating a VM clone, rolling back to a snapshot, or pausing an idle instance is part of the standard KVM toolkit. We’ve baked those capabilities straight into PgMaker, so backups and restores feel as natural as clicking a button.
+The New Default:
+Database Credentials = A Lightweight KVM
 
-Stronger Security Posture
-Running each database in its own VM adds an extra containment layer. Even if one instance encounters a vulnerability, the others remain insulated.
+Going forward, when you simply request database credentials through PgMaker, you’re no longer just getting a database on shared bare-metal hardware—you’re getting your own lightweight KVM virtual machine, automatically and transparently.
 
-PgMaker + KVM: At a Glance
-Golden VM Templates
-Our team maintains hardened images preloaded with your choice of PostgreSQL version, extensions, and optimized OS settings.
+Here’s what the default KVM configuration looks like:
 
-Automated Provisioning
-When you request a new database, PgMaker’s control plane instructs our KVM orchestrator to spin up a fresh VM, configure storage paths, inject your credentials, and register it with our network fabric.
 
-Seamless Networking
-Each VM receives a dedicated virtual NIC that’s automatically whitelisted in pg_hba.conf and our firewall. Connection details appear instantly in your PgMaker dashboard.
+Resource	Default Allocation
+Memory	2 GB
+CPU Cores	2 vCPUs
+Disk	30 GB non-persistent disk
+This setup is perfect for typical development and testing workloads—giving you an isolated, lightweight, and fast PostgreSQL environment without any extra steps.
 
-On-the-Fly Scaling
-Need more RAM, CPU, or IOPS? Adjust your VM’s resource allocation live. We’ll migrate it in the background with zero downtime.
+Need More Power?
+Introducing KVM_MEMORY and KVM_CORE
 
-Centralized Monitoring
-All VM and database metrics stream into a unified dashboard—so you always have full visibility into performance and capacity.
+If your application or testing workload needs more horsepower, you can request a bigger VM easily by providing additional parameters:
 
-What’s Changing (Effective This Friday)
-Default to KVM
-As of Friday, all new PgMaker database requests will spin up KVM-based instances by default.
+KVM_MEMORY — set the desired memory in megabytes (MB)
+(e.g., KVM_MEMORY=4096 for 4GB RAM)
 
-Bare-Metal by Exception
-If your workload truly needs a bare-metal machine—say, for custom hardware, regulatory constraints, or ultra-low latency—please open a support ticket. In your request, let us know:
+KVM_CORE — set the number of vCPUs
+(e.g., KVM_CORE=4 for 4 cores)
 
-Why KVM doesn’t meet your requirements
+Simply pass these environment variables when requesting your database, and PgMaker will size the KVM accordingly.
 
-Which bare-metal features you need
+Tip: If you’re unsure about sizing, start small. It’s easy to resize later based on actual workload needs.
 
-We’ll review and work with you to find the right solution.
+What About Storage?
+Expanding Non-Persistent Disks with KVM_ADD_DISK
 
-What’s Next in PgMaker KVM Insights
-Deep Dive: VM Image Hardening
+At launch, all development VMs are created with non-persistent storage.
+This means:
 
-Storage & Filesystem Best Practices
+Data will persist across reboots.
 
-Network Topologies & High Availability
+But VMs aren’t designed for long-term disaster recovery (separate backup strategies are needed).
 
-Disaster Recovery with VM Snapshots
+If you need additional disk space for larger datasets or testing, you can use:
 
-Performance Tuning in Virtualized Environments
+KVM_ADD_DISK — specify extra space in megabytes (MB)
+(e.g., KVM_ADD_DISK=20480 for 20GB more storage)
 
-We’re thrilled to bring you along on this journey. If you have questions, feedback, or specific topics you’d like us to cover, drop a comment below or reach out to the PgMaker team directly. Here’s to more reliable, scalable, and manageable PostgreSQL deployments!
+We’ll automatically attach a new disk to your VM and make it available to PostgreSQL.
+
+Note: As of today, persistent (survivable across rebuilds or host failures) disks are not yet available for KVM-based databases. Support for persistent storage is on our roadmap and we’ll announce it once ready.
+
+Quick Recap
+
+If you...	PgMaker will...
+Just request credentials	Give you a KVM (2 GB RAM, 2 vCPU, 30 GB disk)
+Set KVM_MEMORY, KVM_CORE	Provision a bigger VM with your requested resources
+Set KVM_ADD_DISK	Attach extra non-persistent storage to your VM
+What’s Next
+In the coming weeks, we’ll continue rolling out improvements including:
+
+Persistent disk support
+
+High availability options inside KVM
+
+Better disk encryption and backup capabilities
+
+We’ll also publish deep dives into how storage, networking, and resource management are handled under the hood.
+
+We’re excited to open up this new chapter of PgMaker, bringing more flexibility, speed, and isolation to your database environments. If you have any questions, run into issues, or just want to learn more about what’s possible, don’t hesitate to reach out to the PgMaker team!
+
+Stay tuned for more updates.
