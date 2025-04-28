@@ -1,75 +1,43 @@
-PgMaker KVM Insights — Part 2:
-Development Databases Now Live on KVM
+const getKvmParam = (postParams) => {
+    let kvmParam = {};
+    let paramsObj = {};
 
-Last Friday, we officially rolled out our first wave of PostgreSQL databases inside KVM virtual machines for development environments. This marks a major milestone for PgMaker as we continue to modernize how databases are provisioned and managed.
+    if (Array.isArray(postParams)) {
+        for (let i = 0; i < postParams.length; i += 2) {
+            const key = postParams[i];
+            const value = postParams[i + 1];
+            paramsObj[key] = value;
+        }
+    } else {
+        paramsObj = Object.fromEntries(postParams.entries());
+    }
 
-In this post, we’ll walk you through what happens when you request a database today, what’s provisioned by default, and how you can customize your KVM instance if you need more resources.
+    const dbName = paramsObj["dbName"];
+    let isDevDb = false;
 
-The New Default:
-Database Credentials = A Lightweight KVM
+    if (dbName) {
+        if (!getDBConfig(dbName)) isDevDb = true;
+    } else {
+        isDevDb = true;
+    }
 
-Going forward, when you simply request database credentials through PgMaker, you’re no longer just getting a database on shared bare-metal hardware—you’re getting your own lightweight KVM virtual machine, automatically and transparently.
+    const safeParseInt = (val, fallback) => {
+        if (val === undefined || val === null || val === "") {
+            return fallback;
+        }
+        return parseInt(val);
+    };
 
-Here’s what the default KVM configuration looks like:
+    kvmParam.pgMakerMachine = paramsObj["machine"] ?? paramsObj["pgMakerMachine"] ?? (isDevDb ? 'firecracker' : 'baremetal');
+    kvmParam.KVM_CLUSTER = paramsObj["KVM_CLUSTER"] ?? "db";
+    kvmParam.KVM_VERSION = paramsObj["KVM_VERSION"] ?? "0.30";
+    kvmParam.KVM_MEMORY_SIZE = safeParseInt(paramsObj["KVM_MEMORY_SIZE"], isDevDb ? 2048 : 16384);
+    kvmParam.KVM_CPU_CORES = safeParseInt(paramsObj["KVM_CPU_CORES"], isDevDb ? 2 : 8);
+    kvmParam.KVM_PERSISTENT_DISK_MB = safeParseInt(paramsObj["KVM_PERSISTENT_DISK_MB"], isDevDb ? 0 : 51200);
+    kvmParam.KVM_DISK_SIZE_ADD = safeParseInt(paramsObj["KVM_DISK_SIZE_ADD"], undefined);
+    kvmParam.KVM_NET_RATE_LIMITER = safeParseInt(paramsObj["KVM_NET_RATE_LIMITER"], 0);
+    kvmParam.KVM_DISK_RATE_LIMITER = safeParseInt(paramsObj["KVM_DISK_RATE_LIMITER"], 0);
+    kvmParam.KVM_USE_FIRECRACKER = paramsObj["KVM_USE_FIRECRACKER"] ?? true;
 
-
-Resource	Default Allocation
-Memory	2 GB
-CPU Cores	2 vCPUs
-Disk	30 GB non-persistent disk
-This setup is perfect for typical development and testing workloads—giving you an isolated, lightweight, and fast PostgreSQL environment without any extra steps.
-
-Need More Power?
-Introducing KVM_MEMORY and KVM_CORE
-
-If your application or testing workload needs more horsepower, you can request a bigger VM easily by providing additional parameters:
-
-KVM_MEMORY — set the desired memory in megabytes (MB)
-(e.g., KVM_MEMORY=4096 for 4GB RAM)
-
-KVM_CORE — set the number of vCPUs
-(e.g., KVM_CORE=4 for 4 cores)
-
-Simply pass these environment variables when requesting your database, and PgMaker will size the KVM accordingly.
-
-Tip: If you’re unsure about sizing, start small. It’s easy to resize later based on actual workload needs.
-
-What About Storage?
-Expanding Non-Persistent Disks with KVM_ADD_DISK
-
-At launch, all development VMs are created with non-persistent storage.
-This means:
-
-Data will persist across reboots.
-
-But VMs aren’t designed for long-term disaster recovery (separate backup strategies are needed).
-
-If you need additional disk space for larger datasets or testing, you can use:
-
-KVM_ADD_DISK — specify extra space in megabytes (MB)
-(e.g., KVM_ADD_DISK=20480 for 20GB more storage)
-
-We’ll automatically attach a new disk to your VM and make it available to PostgreSQL.
-
-Note: As of today, persistent (survivable across rebuilds or host failures) disks are not yet available for KVM-based databases. Support for persistent storage is on our roadmap and we’ll announce it once ready.
-
-Quick Recap
-
-If you...	PgMaker will...
-Just request credentials	Give you a KVM (2 GB RAM, 2 vCPU, 30 GB disk)
-Set KVM_MEMORY, KVM_CORE	Provision a bigger VM with your requested resources
-Set KVM_ADD_DISK	Attach extra non-persistent storage to your VM
-What’s Next
-In the coming weeks, we’ll continue rolling out improvements including:
-
-Persistent disk support
-
-High availability options inside KVM
-
-Better disk encryption and backup capabilities
-
-We’ll also publish deep dives into how storage, networking, and resource management are handled under the hood.
-
-We’re excited to open up this new chapter of PgMaker, bringing more flexibility, speed, and isolation to your database environments. If you have any questions, run into issues, or just want to learn more about what’s possible, don’t hesitate to reach out to the PgMaker team!
-
-Stay tuned for more updates.
+    return kvmParam;
+};
