@@ -1,43 +1,55 @@
-const getKvmParam = (postParams) => {
-    let kvmParam = {};
-    let paramsObj = {};
+const { exec } = require('child_process');
+const { Client } = require('pg');
+const fs = require('fs');
 
-    if (Array.isArray(postParams)) {
-        for (let i = 0; i < postParams.length; i += 2) {
-            const key = postParams[i];
-            const value = postParams[i + 1];
-            paramsObj[key] = value;
-        }
-    } else {
-        paramsObj = Object.fromEntries(postParams.entries());
+const ARCHIVE_DIR = '/var/lib/postgresql/wal_archive'; // Change as needed
+const PG_ARCHIVECLEANUP = '/usr/lib/postgresql/14/bin/pg_archivecleanup'; // Adjust path
+const LOG_FILE = '/var/log/postgres_archive_cleanup.log';
+
+// PostgreSQL connection
+const pgClient = new Client({
+  user: 'postgres',
+  database: 'postgres', // Use any valid DB name
+});
+
+(async () => {
+  try {
+    await pgClient.connect();
+
+    // Step 1: Get minimum flush_lsn
+    const lsnResult = await pgClient.query(`
+      SELECT pg_walfile_name(MIN(flush_lsn)) AS wal_file
+      FROM pg_stat_replication;
+    `);
+
+    const walFile = lsnResult.rows[0].wal_file;
+
+    if (!walFile) {
+      log(`No replication info found. Cleanup skipped.`);
+      return;
     }
 
-    const dbName = paramsObj["dbName"];
-    let isDevDb = false;
+    log(`Cleaning WALs older than ${walFile}`);
 
-    if (dbName) {
-        if (!getDBConfig(dbName)) isDevDb = true;
-    } else {
-        isDevDb = true;
-    }
+    // Step 2: Execute pg_archivecleanup
+    const cmd = `${PG_ARCHIVECLEANUP} ${ARCHIVE_DIR} ${walFile}`;
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        log(`pg_archivecleanup error: ${error.message}`);
+        return;
+      }
+      if (stderr) log(`stderr: ${stderr}`);
+      if (stdout) log(stdout.trim());
+    });
+  } catch (err) {
+    log(`Script error: ${err.message}`);
+  } finally {
+    await pgClient.end();
+  }
+})();
 
-    const safeParseInt = (val, fallback) => {
-        if (val === undefined || val === null || val === "") {
-            return fallback;
-        }
-        return parseInt(val);
-    };
-
-    kvmParam.pgMakerMachine = paramsObj["machine"] ?? paramsObj["pgMakerMachine"] ?? (isDevDb ? 'firecracker' : 'baremetal');
-    kvmParam.KVM_CLUSTER = paramsObj["KVM_CLUSTER"] ?? "db";
-    kvmParam.KVM_VERSION = paramsObj["KVM_VERSION"] ?? "0.30";
-    kvmParam.KVM_MEMORY_SIZE = safeParseInt(paramsObj["KVM_MEMORY_SIZE"], isDevDb ? 2048 : 16384);
-    kvmParam.KVM_CPU_CORES = safeParseInt(paramsObj["KVM_CPU_CORES"], isDevDb ? 2 : 8);
-    kvmParam.KVM_PERSISTENT_DISK_MB = safeParseInt(paramsObj["KVM_PERSISTENT_DISK_MB"], isDevDb ? 0 : 51200);
-    kvmParam.KVM_DISK_SIZE_ADD = safeParseInt(paramsObj["KVM_DISK_SIZE_ADD"], undefined);
-    kvmParam.KVM_NET_RATE_LIMITER = safeParseInt(paramsObj["KVM_NET_RATE_LIMITER"], 0);
-    kvmParam.KVM_DISK_RATE_LIMITER = safeParseInt(paramsObj["KVM_DISK_RATE_LIMITER"], 0);
-    kvmParam.KVM_USE_FIRECRACKER = paramsObj["KVM_USE_FIRECRACKER"] ?? true;
-
-    return kvmParam;
-};
+function log(message) {
+  const timestamp = new Date().toISOString();
+  fs.appendFileSync(LOG_FILE, `${timestamp} - ${message}\n`);
+  console.log(`${timestamp} - ${message}`);
+}
