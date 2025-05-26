@@ -1,55 +1,140 @@
-const { exec } = require('child_process');
-const { Client } = require('pg');
-const fs = require('fs');
+CREATE TABLE IF NOT EXISTS metrics (
+  time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ip TEXT,
+  mac TEXT,
+  cluster TEXT,
+  pg_version TEXT,
+  pid TEXT,
+  cpu TEXT,
+  total_disk BIGINT,
+  data_local_disk_used_percent DOUBLE PRECISION,
+  total_cpus INTEGER,
+  cpu_used_percent DOUBLE PRECISION,
+  total_memory BIGINT,
+  memory_used_percent DOUBLE PRECISION,
+  total_swap BIGINT,
+  swap_used_percent DOUBLE PRECISION,
+  db_state TEXT,
+  supervisor_state BOOLEAN,
+  supervisor_state_timestamp TIMESTAMPTZ,
+  db_state_timestamp TIMESTAMPTZ
+);
 
-const ARCHIVE_DIR = '/var/lib/postgresql/wal_archive'; // Change as needed
-const PG_ARCHIVECLEANUP = '/usr/lib/postgresql/14/bin/pg_archivecleanup'; // Adjust path
-const LOG_FILE = '/var/log/postgres_archive_cleanup.log';
+SELECT create_hypertable('metrics', 'time', if_not_exists => TRUE);
 
-// PostgreSQL connection
-const pgClient = new Client({
+const express = require('express');
+const { Pool } = require('pg');
+const WebSocket = require('ws');
+
+const app = express();
+const PORT = 4000;
+
+const pool = new Pool({
   user: 'postgres',
-  database: 'postgres', // Use any valid DB name
+  host: 'localhost',
+  database: 'metricsdb',
+  password: 'postgres',
+  port: 5432,
 });
 
-(async () => {
+app.use(express.json());
+
+app.post('/ingest', async (req, res) => {
+  const m = req.body;
   try {
-    await pgClient.connect();
-
-    // Step 1: Get minimum flush_lsn
-    const lsnResult = await pgClient.query(`
-      SELECT pg_walfile_name(MIN(flush_lsn)) AS wal_file
-      FROM pg_stat_replication;
-    `);
-
-    const walFile = lsnResult.rows[0].wal_file;
-
-    if (!walFile) {
-      log(`No replication info found. Cleanup skipped.`);
-      return;
-    }
-
-    log(`Cleaning WALs older than ${walFile}`);
-
-    // Step 2: Execute pg_archivecleanup
-    const cmd = `${PG_ARCHIVECLEANUP} ${ARCHIVE_DIR} ${walFile}`;
-    exec(cmd, (error, stdout, stderr) => {
-      if (error) {
-        log(`pg_archivecleanup error: ${error.message}`);
-        return;
-      }
-      if (stderr) log(`stderr: ${stderr}`);
-      if (stdout) log(stdout.trim());
-    });
+    await pool.query(\`
+      INSERT INTO metrics (
+        ip, mac, cluster, pg_version, pid, cpu,
+        total_disk, data_local_disk_used_percent, total_cpus, cpu_used_percent,
+        total_memory, memory_used_percent, total_swap, swap_used_percent,
+        db_state, supervisor_state, supervisor_state_timestamp, db_state_timestamp
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10,
+        $11, $12, $13, $14,
+        $15, $16, $17, $18
+      )
+    \`, [
+      m.ip, m.mac, m.cluster, m.pgVersion, m.pid, m.cpu,
+      m.totalDisk, parseFloat(m.dataLocalDiskUsedPercent), m.totalCpus, parseFloat(m.cpuUsedPercent),
+      m.totalMemory, parseFloat(m.memoryUsedPercent), m.totalSwap, parseFloat(m.swapUsedPercent),
+      m.dbState, m.supervisorState, m.supervisorStateTimestamp, m.dbStateTimestamp
+    ]);
+    res.sendStatus(204);
   } catch (err) {
-    log(`Script error: ${err.message}`);
-  } finally {
-    await pgClient.end();
+    console.error('Insert error:', err.message);
+    res.status(500).json({ error: 'Failed to insert metrics' });
   }
-})();
+});
 
-function log(message) {
-  const timestamp = new Date().toISOString();
-  fs.appendFileSync(LOG_FILE, `${timestamp} - ${message}\n`);
-  console.log(`${timestamp} - ${message}`);
-}
+app.get('/max-metric', async (req, res) => {
+  const { metric, start, end } = req.query;
+  if (!metric || !start || !end) return res.status(400).json({ error: 'metric, start, end required' });
+
+  try {
+    const result = await pool.query(\`
+      SELECT db_state, MAX(\${metric}) AS max_value
+      FROM metrics
+      WHERE time BETWEEN $1 AND $2
+      GROUP BY db_state
+    \`, [start, end]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/stats-metric', async (req, res) => {
+  const { metric, start, end } = req.query;
+  if (!metric || !start || !end) return res.status(400).json({ error: 'metric, start, end required' });
+
+  try {
+    const result = await pool.query(\`
+      SELECT db_state,
+        MAX(\${metric}) AS max,
+        MIN(\${metric}) AS min,
+        AVG(\${metric}) AS avg
+      FROM metrics
+      WHERE time BETWEEN $1 AND $2
+      GROUP BY db_state
+    \`, [start, end]);
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+const ws = new WebSocket('ws://localhost:9000');
+
+ws.on('message', async (data) => {
+  const m = JSON.parse(data);
+  try {
+    await pool.query(\`
+      INSERT INTO metrics (
+        ip, mac, cluster, pg_version, pid, cpu,
+        total_disk, data_local_disk_used_percent, total_cpus, cpu_used_percent,
+        total_memory, memory_used_percent, total_swap, swap_used_percent,
+        db_state, supervisor_state, supervisor_state_timestamp, db_state_timestamp
+      ) VALUES (
+        $1, $2, $3, $4, $5, $6,
+        $7, $8, $9, $10,
+        $11, $12, $13, $14,
+        $15, $16, $17, $18
+      )
+    \`, [
+      m.ip, m.mac, m.cluster, m.pgVersion, m.pid, m.cpu,
+      m.totalDisk, parseFloat(m.dataLocalDiskUsedPercent), m.totalCpus, parseFloat(m.cpuUsedPercent),
+      m.totalMemory, parseFloat(m.memoryUsedPercent), m.totalSwap, parseFloat(m.swapUsedPercent),
+      m.dbState, m.supervisorState, m.supervisorStateTimestamp, m.dbStateTimestamp
+    ]);
+  } catch (err) {
+    console.error('WebSocket insert error:', err.message);
+  }
+});
+
+ws.on('open', () => console.log('Connected to WebSocket'));
+ws.on('error', (err) => console.error('WebSocket error:', err.message));
+
+app.listen(PORT, () => {
+  console.log(`pgmaker-metrics service running at http://localhost:${PORT}`);
+});
