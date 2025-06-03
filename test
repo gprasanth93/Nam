@@ -1,140 +1,127 @@
-CREATE TABLE IF NOT EXISTS metrics (
-  time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  ip TEXT,
-  mac TEXT,
-  cluster TEXT,
-  pg_version TEXT,
-  pid TEXT,
-  cpu TEXT,
-  total_disk BIGINT,
-  data_local_disk_used_percent DOUBLE PRECISION,
-  total_cpus INTEGER,
-  cpu_used_percent DOUBLE PRECISION,
-  total_memory BIGINT,
-  memory_used_percent DOUBLE PRECISION,
-  total_swap BIGINT,
-  swap_used_percent DOUBLE PRECISION,
-  db_state TEXT,
-  supervisor_state BOOLEAN,
-  supervisor_state_timestamp TIMESTAMPTZ,
-  db_state_timestamp TIMESTAMPTZ
-);
+Here’s a draft for your internal blog post titled:
 
-SELECT create_hypertable('metrics', 'time', if_not_exists => TRUE);
+⸻
 
-const express = require('express');
-const { Pool } = require('pg');
-const WebSocket = require('ws');
+How We Scaled PostgreSQL Time-Series Monitoring with TimescaleDB and WebSockets in PgMaker
 
-const app = express();
-const PORT = 4000;
+📅 May 2025 – Engineering Blog
 
-const pool = new Pool({
-  user: 'postgres',
-  host: 'localhost',
-  database: 'metricsdb',
-  password: 'postgres',
-  port: 5432,
-});
+⸻
 
-app.use(express.json());
+🧩 Introduction
 
-app.post('/ingest', async (req, res) => {
-  const m = req.body;
-  try {
-    await pool.query(\`
-      INSERT INTO metrics (
-        ip, mac, cluster, pg_version, pid, cpu,
-        total_disk, data_local_disk_used_percent, total_cpus, cpu_used_percent,
-        total_memory, memory_used_percent, total_swap, swap_used_percent,
-        db_state, supervisor_state, supervisor_state_timestamp, db_state_timestamp
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10,
-        $11, $12, $13, $14,
-        $15, $16, $17, $18
-      )
-    \`, [
-      m.ip, m.mac, m.cluster, m.pgVersion, m.pid, m.cpu,
-      m.totalDisk, parseFloat(m.dataLocalDiskUsedPercent), m.totalCpus, parseFloat(m.cpuUsedPercent),
-      m.totalMemory, parseFloat(m.memoryUsedPercent), m.totalSwap, parseFloat(m.swapUsedPercent),
-      m.dbState, m.supervisorState, m.supervisorStateTimestamp, m.dbStateTimestamp
-    ]);
-    res.sendStatus(204);
-  } catch (err) {
-    console.error('Insert error:', err.message);
-    res.status(500).json({ error: 'Failed to insert metrics' });
-  }
-});
+As part of PgMaker’s vision to simplify and scale database deployment on KVM infrastructure, we recently rolled out a centralized time-series monitoring service built on TimescaleDB. This system captures live metrics from every KVM VM via WebSocket and pipes it into a single scalable PostgreSQL hypertable. The results? A seamless monitoring experience in Grafana and a foundation for intelligent KVM resource management.
 
-app.get('/max-metric', async (req, res) => {
-  const { metric, start, end } = req.query;
-  if (!metric || !start || !end) return res.status(400).json({ error: 'metric, start, end required' });
+⸻
 
-  try {
-    const result = await pool.query(\`
-      SELECT db_state, MAX(\${metric}) AS max_value
-      FROM metrics
-      WHERE time BETWEEN $1 AND $2
-      GROUP BY db_state
-    \`, [start, end]);
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+📡 Real-Time Data via WebSockets
 
-app.get('/stats-metric', async (req, res) => {
-  const { metric, start, end } = req.query;
-  if (!metric || !start || !end) return res.status(400).json({ error: 'metric, start, end required' });
+Every KVM spun up by PgMaker is configured to stream system statistics to a central service over WebSocket every 2 minutes. These metrics include:
+	•	Total Memory
+	•	Used Memory %
+	•	CPU Used %
+	•	Disk & Swap Used %
+	•	dbState (e.g., PRIMARY, STANDBY, UNHEALTHY)
+	•	supervisorState flags
 
-  try {
-    const result = await pool.query(\`
-      SELECT db_state,
-        MAX(\${metric}) AS max,
-        MIN(\${metric}) AS min,
-        AVG(\${metric}) AS avg
-      FROM metrics
-      WHERE time BETWEEN $1 AND $2
-      GROUP BY db_state
-    \`, [start, end]);
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+Each KVM sends a structured JSON packet containing its identity and system usage. The backend listens concurrently to over 200 active WebSocket streams per host using lightweight Node.js services, efficiently inserting them into a TimescaleDB hypertable.
 
-const ws = new WebSocket('ws://localhost:9000');
+⸻
 
-ws.on('message', async (data) => {
-  const m = JSON.parse(data);
-  try {
-    await pool.query(\`
-      INSERT INTO metrics (
-        ip, mac, cluster, pg_version, pid, cpu,
-        total_disk, data_local_disk_used_percent, total_cpus, cpu_used_percent,
-        total_memory, memory_used_percent, total_swap, swap_used_percent,
-        db_state, supervisor_state, supervisor_state_timestamp, db_state_timestamp
-      ) VALUES (
-        $1, $2, $3, $4, $5, $6,
-        $7, $8, $9, $10,
-        $11, $12, $13, $14,
-        $15, $16, $17, $18
-      )
-    \`, [
-      m.ip, m.mac, m.cluster, m.pgVersion, m.pid, m.cpu,
-      m.totalDisk, parseFloat(m.dataLocalDiskUsedPercent), m.totalCpus, parseFloat(m.cpuUsedPercent),
-      m.totalMemory, parseFloat(m.memoryUsedPercent), m.totalSwap, parseFloat(m.swapUsedPercent),
-      m.dbState, m.supervisorState, m.supervisorStateTimestamp, m.dbStateTimestamp
-    ]);
-  } catch (err) {
-    console.error('WebSocket insert error:', err.message);
-  }
-});
+🧠 Why TimescaleDB?
 
-ws.on('open', () => console.log('Connected to WebSocket'));
-ws.on('error', (err) => console.error('WebSocket error:', err.message));
+TimescaleDB, built on PostgreSQL, is purpose-built for time-series workloads. Some of its key benefits for our use case include:
+	•	✅ Efficient ingestion at scale (handles tens of millions of rows without breaking a sweat)
+	•	✅ Powerful time-window queries for alerts, summaries, and dashboards
+	•	✅ Native PostgreSQL compatibility, making integration and tooling dead simple
+	•	✅ Hypertables for auto-partitioning and time-indexing
+	•	✅ Seamless integration with Grafana for real-time visualization
 
-app.listen(PORT, () => {
-  console.log(`pgmaker-metrics service running at http://localhost:${PORT}`);
-});
+With TimescaleDB, we didn’t need to change our database stack — just enhanced it for time-awareness.
+
+⸻
+
+📊 Scaling: How Much Data Are We Managing?
+
+Let’s do some back-of-the-envelope math:
+	•	🔄 Every KVM sends a record every 2 mins
+	•	📦 Each metric insert = 1 row
+	•	🧱 200 KVMs per host
+	•	🌍 15 hosts currently online
+
+🧮 Daily Volume:
+
+200 KVMs x 15 hosts = 3000 VMs
+Every 2 mins → 30 inserts/hour → 720 inserts/day
+
+3000 VMs × 720 = 2,160,000 rows/day
+
+📈 Monthly:
+
+~65 million rows/month in a single hypertable
+
+Thanks to TimescaleDB’s automatic chunking and PostgreSQL-native indexing, we handle this load with sub-second query latency.
+
+⸻
+
+📉 Visualization with Grafana
+
+Our Grafana dashboards are powered directly by TimescaleDB queries. Using dashboard variables, we built filters for:
+	•	Region (UK, US, HK)
+	•	dbName or Hostname
+	•	Time range
+	•	Metric type (CPU, Memory, Disk, etc.)
+
+Panels display:
+	•	Live stats per KVM
+	•	Historical graphs (last 24h, 7d)
+	•	Heatmaps of unhealthy states
+
+The best part? We query one unified hypertable, and the dashboard can switch between regions using dynamic data source variables.
+
+⸻
+
+🔭 What’s Next?
+
+This architecture lays the groundwork for intelligent, adaptive infrastructure.
+
+🚀 Upcoming Enhancements:
+	•	🧠 Auto-scaling recommendations: Predict KVM size upgrades/downgrades based on historical trends.
+	•	📈 Anomaly detection: Flag KVMs with unusual CPU/memory patterns.
+	•	🔔 Alerting pipelines: Notify teams of degraded or unhealthy KVMs using Timescale query triggers or Grafana alerts.
+	•	💾 Retention tuning: Optimize disk via retention policies, offloading stale data to S3 or Glacier.
+
+⸻
+
+🤖 Future: Autonomous KVM Tuning?
+
+Imagine:
+	•	A small KVM starts hitting 80% memory regularly.
+	•	Our system detects it.
+	•	PgMaker provisions a larger KVM and auto-promotes.
+
+We’re building the foundation to let metrics not just inform us — but automate our infrastructure.
+
+⸻
+
+🧩 Summary
+
+Component	Stack Used
+Ingestion	Node.js + WebSockets
+Time-series DB	PostgreSQL + TimescaleDB
+Dashboarding	Grafana + PostgreSQL plugin
+Scale	~2M rows/day, growing monthly
+Storage	Single hypertable w/ chunking
+
+
+⸻
+
+🧠 Takeaway
+
+With TimescaleDB and WebSockets, we built a lightweight, scalable, and future-proof monitoring solution that empowers our KVM database infrastructure to be observable, adaptable, and soon — self-optimizing.
+
+Let the metrics guide us. 🚀
+
+⸻
+
+Let me know if you want a version for external publication, or an internal version with deeper infrastructure stats/logs!
