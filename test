@@ -1,127 +1,397 @@
-Here’s a draft for your internal blog post titled:
+// vm_stats_collector.js
+const si = require('systeminformation');
+const os = require('os');
+const { Pool } = require('pg');
+const { v4: uuidv4 } = require('uuid');
 
-⸻
+const VM_ID = process.env.VM_ID || uuidv4();
+const APP_NAME = process.env.APP_NAME || 'firecracker-app';
+const DB_URL = process.env.DATABASE_URL || 'postgres://postgres:mysecret@localhost:5432/vm_stats';
 
-How We Scaled PostgreSQL Time-Series Monitoring with TimescaleDB and WebSockets in PgMaker
+const pool = new Pool({ connectionString: DB_URL });
 
-📅 May 2025 – Engineering Blog
+async function collectStats() {
+  try {
+    const [
+      cpu, mem, disk, fs, net, load, processes, currentLoad,
+      diskIO, uptime, osInfo, temp, fsStats
+    ] = await Promise.all([
+      si.cpu(), si.mem(), si.diskLayout(), si.fsSize(), si.networkStats(),
+      si.currentLoad(), si.processes(), si.currentLoad(),
+      si.disksIO().catch(() => null), si.time(), si.osInfo(),
+      si.cpuTemperature(), si.fsStats().catch(() => null)
+    ]);
 
-⸻
+    const nodeProcess = processes.list.find(p => p.name === 'node');
+    const topProcesses = processes.list
+      .sort((a, b) => b.pcpu - a.pcpu)
+      .slice(0, 10)
+      .map(p => ({
+        pid: p.pid, name: p.name, cpu: p.pcpu, mem: p.pmem,
+        mem_rss: p.mem_rss, started: p.started, state: p.state
+      }));
 
-🧩 Introduction
+    const payload = {
+      timestamp: new Date().toISOString(),
+      vm_id: VM_ID,
+      app_name: APP_NAME,
+      version: 'v1',
+      os_info: osInfo,
+      system_stats: {
+        cpu: { ...cpu, load: currentLoad.currentload, temperature: temp },
+        memory: mem, diskLayout: disk, filesystems: fs,
+        fsStats, diskIO, network: { stats: net }, load, uptime: uptime.uptime
+      },
+      process_stats: {
+        node: nodeProcess ? {
+          pid: nodeProcess.pid, cpu: nodeProcess.pcpu, memory: nodeProcess.mem_rss
+        } : null,
+        top: topProcesses,
+        total: processes.all
+      }
+    };
 
-As part of PgMaker’s vision to simplify and scale database deployment on KVM infrastructure, we recently rolled out a centralized time-series monitoring service built on TimescaleDB. This system captures live metrics from every KVM VM via WebSocket and pipes it into a single scalable PostgreSQL hypertable. The results? A seamless monitoring experience in Grafana and a foundation for intelligent KVM resource management.
+    await pool.query(
+      `INSERT INTO vm_stats (timestamp, vm_id, app_name, version, os_info, system_stats, process_stats)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        payload.timestamp, payload.vm_id, payload.app_name, payload.version,
+        payload.os_info, payload.system_stats, payload.process_stats
+      ]
+    );
 
-⸻
+    console.log(`[${payload.timestamp}] Stats written for ${APP_NAME} (${VM_ID})`);
 
-📡 Real-Time Data via WebSockets
+  } catch (err) {
+    console.error("Error collecting or sending stats:", err);
+  }
+}
 
-Every KVM spun up by PgMaker is configured to stream system statistics to a central service over WebSocket every 2 minutes. These metrics include:
-	•	Total Memory
-	•	Used Memory %
-	•	CPU Used %
-	•	Disk & Swap Used %
-	•	dbState (e.g., PRIMARY, STANDBY, UNHEALTHY)
-	•	supervisorState flags
-
-Each KVM sends a structured JSON packet containing its identity and system usage. The backend listens concurrently to over 200 active WebSocket streams per host using lightweight Node.js services, efficiently inserting them into a TimescaleDB hypertable.
-
-⸻
-
-🧠 Why TimescaleDB?
-
-TimescaleDB, built on PostgreSQL, is purpose-built for time-series workloads. Some of its key benefits for our use case include:
-	•	✅ Efficient ingestion at scale (handles tens of millions of rows without breaking a sweat)
-	•	✅ Powerful time-window queries for alerts, summaries, and dashboards
-	•	✅ Native PostgreSQL compatibility, making integration and tooling dead simple
-	•	✅ Hypertables for auto-partitioning and time-indexing
-	•	✅ Seamless integration with Grafana for real-time visualization
-
-With TimescaleDB, we didn’t need to change our database stack — just enhanced it for time-awareness.
-
-⸻
-
-📊 Scaling: How Much Data Are We Managing?
-
-Let’s do some back-of-the-envelope math:
-	•	🔄 Every KVM sends a record every 2 mins
-	•	📦 Each metric insert = 1 row
-	•	🧱 200 KVMs per host
-	•	🌍 15 hosts currently online
-
-🧮 Daily Volume:
-
-200 KVMs x 15 hosts = 3000 VMs
-Every 2 mins → 30 inserts/hour → 720 inserts/day
-
-3000 VMs × 720 = 2,160,000 rows/day
-
-📈 Monthly:
-
-~65 million rows/month in a single hypertable
-
-Thanks to TimescaleDB’s automatic chunking and PostgreSQL-native indexing, we handle this load with sub-second query latency.
-
-⸻
-
-📉 Visualization with Grafana
-
-Our Grafana dashboards are powered directly by TimescaleDB queries. Using dashboard variables, we built filters for:
-	•	Region (UK, US, HK)
-	•	dbName or Hostname
-	•	Time range
-	•	Metric type (CPU, Memory, Disk, etc.)
-
-Panels display:
-	•	Live stats per KVM
-	•	Historical graphs (last 24h, 7d)
-	•	Heatmaps of unhealthy states
-
-The best part? We query one unified hypertable, and the dashboard can switch between regions using dynamic data source variables.
-
-⸻
-
-🔭 What’s Next?
-
-This architecture lays the groundwork for intelligent, adaptive infrastructure.
-
-🚀 Upcoming Enhancements:
-	•	🧠 Auto-scaling recommendations: Predict KVM size upgrades/downgrades based on historical trends.
-	•	📈 Anomaly detection: Flag KVMs with unusual CPU/memory patterns.
-	•	🔔 Alerting pipelines: Notify teams of degraded or unhealthy KVMs using Timescale query triggers or Grafana alerts.
-	•	💾 Retention tuning: Optimize disk via retention policies, offloading stale data to S3 or Glacier.
-
-⸻
-
-🤖 Future: Autonomous KVM Tuning?
-
-Imagine:
-	•	A small KVM starts hitting 80% memory regularly.
-	•	Our system detects it.
-	•	PgMaker provisions a larger KVM and auto-promotes.
-
-We’re building the foundation to let metrics not just inform us — but automate our infrastructure.
-
-⸻
-
-🧩 Summary
-
-Component	Stack Used
-Ingestion	Node.js + WebSockets
-Time-series DB	PostgreSQL + TimescaleDB
-Dashboarding	Grafana + PostgreSQL plugin
-Scale	~2M rows/day, growing monthly
-Storage	Single hypertable w/ chunking
+setInterval(collectStats, 2 * 60 * 1000);
+collectStats();
 
 
-⸻
 
-🧠 Takeaway
 
-With TimescaleDB and WebSockets, we built a lightweight, scalable, and future-proof monitoring solution that empowers our KVM database infrastructure to be observable, adaptable, and soon — self-optimizing.
 
-Let the metrics guide us. 🚀
 
-⸻
+CREATE TABLE IF NOT EXISTS vm_stats (
+    timestamp TIMESTAMPTZ NOT NULL,
+    vm_id TEXT NOT NULL,
+    app_name TEXT,
+    version TEXT,
+    os_info JSONB,
+    system_stats JSONB,
+    process_stats JSONB
+);
+SELECT create_hypertable('vm_stats', 'timestamp', if_not_exists => TRUE);
 
-Let me know if you want a version for external publication, or an internal version with deeper infrastructure stats/logs!
+
+
+{
+  "id": null,
+  "uid": "firecracker-vm-modern",
+  "title": "\ud83d\udd25 Firecracker VM - Modern Metrics View",
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "\ud83d\udd25 CPU Usage per VM (%)",
+      "targets": [
+        {
+          "refId": "A",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       (system_stats->'cpu'->>'load')::FLOAT AS value \nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "line",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "\ud83e\udde0 Memory Usage per VM (%)",
+      "targets": [
+        {
+          "refId": "B",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       ((system_stats->'memory'->>'used')::FLOAT / NULLIF((system_stats->'memory'->>'total')::FLOAT, 0)) * 100 AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "line",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "\ud83d\udcbe Swap Usage per VM (%)",
+      "targets": [
+        {
+          "refId": "C",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       ((system_stats->'memory'->>'swapUsed')::FLOAT / NULLIF((system_stats->'memory'->>'swapTotal')::FLOAT, 0)) * 100 AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "line",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "\ud83d\udfe2 Node.js CPU Usage (%)",
+      "targets": [
+        {
+          "refId": "D",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       (process_stats->'node'->>'cpu')::FLOAT AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "drawStyle": "line",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "stat",
+      "title": "\ud83d\udd22 Total Processes Running",
+      "targets": [
+        {
+          "refId": "E",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       (process_stats->>'total')::INT AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "type": "bargauge",
+      "title": "\ud83c\udff7\ufe0f Top Processes by CPU (%)",
+      "targets": [
+        {
+          "refId": "F",
+          "format": "table",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", \n       (jsonb_array_elements(process_stats->'top')->>'name') AS metric,\n       (jsonb_array_elements(process_stats->'top')->>'cpu')::FLOAT AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 12,
+        "w": 18,
+        "h": 7
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "\ud83d\udce6 Disk Used % per VM",
+      "targets": [
+        {
+          "refId": "G",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT\n  timestamp AS \"time\",\n  vm_id,\n  ((jsonb_array_elements(system_stats->'filesystems')->>'used')::BIGINT / NULLIF((jsonb_array_elements(system_stats->'filesystems')->>'size')::BIGINT, 0)) * 100 AS value\nFROM vm_stats\nWHERE $__timeFilter(timestamp) AND vm_id IN (${vm_id:csv})\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 15,
+            "drawStyle": "line",
+            "spanNulls": true
+          }
+        }
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 6
+      }
+    },
+    {
+      "type": "stat",
+      "title": "\u23f1\ufe0f VM Uptime (Hours)",
+      "targets": [
+        {
+          "refId": "H",
+          "format": "time_series",
+          "datasource": {
+            "type": "postgres",
+            "uid": "bephxy1n23p4wd"
+          },
+          "rawSql": "\nSELECT timestamp AS \"time\", vm_id,\n       (system_stats->>'uptime')::BIGINT / 3600 AS value\nFROM vm_stats\nWHERE $__timeFilter(timestamp) AND vm_id IN (${vm_id:csv})\n"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hours",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "decimals": 2
+        }
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 6
+      }
+    }
+  ],
+  "overwrite": true,
+  "templating": {
+    "list": [
+      {
+        "name": "vm_id",
+        "type": "query",
+        "datasource": {
+          "type": "postgres",
+          "uid": "bephxy1n23p4wd"
+        },
+        "definition": "SELECT DISTINCT vm_id FROM vm_stats ORDER BY vm_id",
+        "query": "SELECT DISTINCT vm_id FROM vm_stats ORDER BY vm_id",
+        "refresh": 1,
+        "label": "VM ID",
+        "includeAll": true,
+        "multi": true,
+        "hide": 0,
+        "current": {}
+      }
+    ]
+  }
+}
