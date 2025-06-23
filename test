@@ -33,48 +33,17 @@
       "pluginName": "PostgreSQL"
     }
   ],
-  "__elements": {},
   "__requires": [
-    {
-      "type": "grafana",
-      "id": "grafana",
-      "name": "Grafana",
-      "version": "10.4.2"
-    },
-    {
-      "type": "datasource",
-      "id": "grafana-postgresql-datasource",
-      "name": "PostgreSQL",
-      "version": "1.0.0"
-    },
-    {
-      "type": "panel",
-      "id": "stat",
-      "name": "Stat",
-      "version": ""
-    },
-    {
-      "type": "panel",
-      "id": "timeseries",
-      "name": "Time series",
-      "version": ""
-    }
+    { "type": "grafana", "id": "grafana", "name": "Grafana", "version": "10.4.2" },
+    { "type": "datasource", "id": "grafana-postgresql-datasource", "name": "PostgreSQL", "version": "1.0.0" },
+    { "type": "panel", "id": "stat", "name": "Stat", "version": "" },
+    { "type": "panel", "id": "timeseries", "name": "Time series", "version": "" },
+    { "type": "panel", "id": "bargauge", "name": "Bar gauge", "version": "" }
   ],
-  "annotations": {
-    "list": [
-      {
-        "builtIn": 1,
-        "datasource": {
-          "type": "grafana",
-          "uid": "-- Grafana --"
-        },
-        "enable": true,
-        "hide": true,
-        "iconColor": "rgba(0, 211, 255, 1)",
-        "name": "Annotations & alerts"
-      }
-    ]
-  },
+  "annotations": { "list": [
+    { "builtIn": 1, "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+      "enable": true, "hide": true, "iconColor": "rgba(0,211,255,1)", "name": "Annotations & alerts" }
+  ]},
   "templating": {
     "list": [
       {
@@ -103,131 +72,377 @@
   },
   "panels": [
     {
-      "datasource": { "type": "datasource", "uid": "-- Mixed --" },
-      "description": "Total Memory of KVM",
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "decimals": 0,
-          "color": { "mode": "fixed", "fixedColor": "#73BF69" },
-          "mappings": [],
-          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] }
-        },
-        "overrides": []
-      },
+      "type": "stat",
+      "title": "Total CPU Cores",
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
-      "id": 1,
-      "pluginVersion": "10.4.2",
+      "fieldConfig": { "defaults": { "unit": "none" }, "overrides": [] },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_UK}"
-          },
-          "editorMode": "code",
-          "format": "table",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
           "rawQuery": true,
-          "rawSql": "SELECT dbname, total_memory AS \"Total Memory\" FROM kvm_metrics\n  WHERE $__timeFilter(\"time\")\n    AND dbname IN (${database})\n    AND hostname IN (${hostname})",
+          "rawSql": "SELECT time, MAX((system_stats->>'cores')::int) AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) GROUP BY time ORDER BY time",
           "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_HK}"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT dbname, total_memory FROM kvm_metrics\n  WHERE $__timeFilter(\"time\")\n    AND dbname IN (${database})\n    AND hostname IN (${hostname})",
-          "refId": "B"
-        },
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_US}"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT dbname, total_memory FROM kvm_metrics\n  WHERE $__timeFilter(\"time\")\n    AND dbname IN (${database})\n    AND hostname IN (${hostname})",
-          "refId": "C"
-        },
-        {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_CN}"
-          },
-          "editorMode": "code",
-          "format": "table",
-          "rawQuery": true,
-          "rawSql": "SELECT dbname, total_memory FROM kvm_metrics\n  WHERE $__timeFilter(\"time\")\n    AND dbname IN (${database})\n    AND hostname IN (${hostname})",
-          "refId": "D"
         }
-      ],
-      "type": "stat",
-      "title": "Stat: Total Memory"
+      ]
     },
     {
-      "datasource": { "type": "datasource", "uid": "-- Mixed --" },
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "custom": { "drawStyle": "line", "fillOpacity": 5 }
-        },
-        "overrides": []
-      },
-      "gridPos": { "h": 8, "w": 12, "x": 6, "y": 0 },
-      "id": 2,
+      "type": "stat",
+      "title": "Total Memory (bytes)",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "rawSql": "SELECT time, SUM((system_stats->>'total_memory')::bigint) AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Total Disk (bytes)",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "rawSql": "SELECT time, SUM((system_stats->>'total_disk')::bigint) AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Swap Used (%)",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "rawSql": "SELECT time, ((system_stats->>'swap_used')::float/NULLIF((system_stats->>'swap_total')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "VM Uptime (hrs)",
+      "gridPos": { "h": 4, "w": 6, "x": 24, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "hours", "decimals": 2 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "rawSql": "SELECT time, (system_stats->>'uptime')::float/3600 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) GROUP BY time ORDER BY time",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU Usage (%)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
       "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
       "targets": [
         {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_UK}"
-          },
-          "editorMode": "code",
-          "format": "time_series",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
           "rawQuery": true,
-          "rawSql": "SELECT\n  time AS \"time\",\n  (system_stats->>'cpu_used_percent')::float AS value\nFROM kvm_metrics\nWHERE $__timeFilter(time)\n  AND dbname IN (${database})\n  AND hostname IN (${hostname})\nORDER BY time",
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->>'cpu_used_percent')::float AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
           "refId": "A"
         },
         {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_HK}"
-          },
-          "editorMode": "code",
-          "format": "time_series",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
           "rawQuery": true,
-          "rawSql": "SELECT\n  time, (system_stats->>'cpu_used_percent')::float AS value\nFROM kvm_metrics\nWHERE $__timeFilter(time)\n  AND dbname IN (${database})\n  AND hostname IN (${hostname})\nORDER BY time",
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->>'cpu_used_percent')::float AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
           "refId": "B"
         },
         {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_US}"
-          },
-          "editorMode": "code",
-          "format": "time_series",
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
           "rawQuery": true,
-          "rawSql": "SELECT time, (system_stats->>'cpu_used_percent')::float AS value\nFROM kvm_metrics\nWHERE $__timeFilter(time)\n  AND dbname IN (${database})\n  AND hostname IN (${hostname})\nORDER BY time",
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->>'cpu_used_percent')::float AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
           "refId": "C"
         },
         {
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_PGMAKER2_LOGGER_CN}"
-          },
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->>'cpu_used_percent')::float AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Memory Usage (%)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 4 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'used_memory')::float/NULLIF((system_stats->>'total_memory')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'used_memory')::float/NULLIF((system_stats->>'total_memory')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'used_memory')::float/NULLIF((system_stats->>'total_memory')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'used_memory')::float/NULLIF((system_stats->>'total_memory')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Swap Usage (%)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'swap_used')::float/NULLIF((system_stats->>'swap_total')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'swap_used')::float/NULLIF((system_stats->>'swap_total')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'swap_used')::float/NULLIF((system_stats->>'swap_total')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, ((system_stats->>'swap_used')::float/NULLIF((system_stats->>'swap_total')::float,0))*100 AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk Read (Bytes)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 10 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'read_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'read_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'read_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'read_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Disk Write (Bytes)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'write_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'write_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'write_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'diskio'->>'write_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Network RX (Bytes)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'rx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'rx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'rx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-дdatasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'rx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Network TX (Bytes)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 22 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'tx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_HK}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'tx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_US}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'tx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "grafana-postgresql-ddatasource", "uid": "${DS_PGMAKER2_LOGGER_CN}" },
+          "rawQuery": true,
+          "format": "time_series",
+          "rawSql": "SELECT time, (system_stats->'network'->>'tx_bytes')::bigint AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "type": "bargauge",
+      "title": "Top 10 Processes by CPU (%)",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 28 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT (elem->>'name') AS metric, (elem->>'cpu')::float AS value FROM kvm_metrics, jsonb_array_elements(process_stats->'list') elem WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY value DESC LIMIT 10",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Filesystem Usage (%)",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
-          "rawSql": "SELECT time, (system_stats->>'cpu_used_percent')::float AS value\nFROM kvm_metrics\nWHERE $__timeFilter(time)\n  AND dbname IN (${database})\n  AND hostname IN (${hostname})\nORDER BY time",
-          "refId": "D"
+          "rawSql": "SELECT time, (fs->>'used')::float*100/NULLIF((fs->>'size')::float,0) AS value FROM kvm_metrics, jsonb_array_elements(system_stats->'filesystems') fs WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
         }
-      ],
+      ]
+    },
+    {
       "type": "timeseries",
-      "title": "CPU Usage (%) Over Time"
+      "title": "Node.js CPU (%)",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 36 },
+      "fieldConfig": { "defaults": { "unit": "percent" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "grafana-postgresql-datasource", "uid": "${DS_PGMAKER2_LOGGER_UK}" },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT time, (process_stats->'node'->>'cpu')::float AS value FROM kvm_metrics WHERE $__timeFilter(time) AND dbname IN(${database}) AND hostname IN(${hostname}) ORDER BY time",
+          "refId": "A"
+        }
+      ]
     }
-    /* — add additional panels here for memory, swap, IO, network, processes, fsStats, top-10 processes, etc. — */
   ]
 }
