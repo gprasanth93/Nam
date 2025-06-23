@@ -1,397 +1,476 @@
-// vm_stats_collector.js
-const si = require('systeminformation');
-const os = require('os');
-const { Pool } = require('pg');
-const { v4: uuidv4 } = require('uuid');
-
-const VM_ID = process.env.VM_ID || uuidv4();
-const APP_NAME = process.env.APP_NAME || 'firecracker-app';
-const DB_URL = process.env.DATABASE_URL || 'postgres://postgres:mysecret@localhost:5432/vm_stats';
-
-const pool = new Pool({ connectionString: DB_URL });
-
-async function collectStats() {
-  try {
-    const [
-      cpu, mem, disk, fs, net, load, processes, currentLoad,
-      diskIO, uptime, osInfo, temp, fsStats
-    ] = await Promise.all([
-      si.cpu(), si.mem(), si.diskLayout(), si.fsSize(), si.networkStats(),
-      si.currentLoad(), si.processes(), si.currentLoad(),
-      si.disksIO().catch(() => null), si.time(), si.osInfo(),
-      si.cpuTemperature(), si.fsStats().catch(() => null)
-    ]);
-
-    const nodeProcess = processes.list.find(p => p.name === 'node');
-    const topProcesses = processes.list
-      .sort((a, b) => b.pcpu - a.pcpu)
-      .slice(0, 10)
-      .map(p => ({
-        pid: p.pid, name: p.name, cpu: p.pcpu, mem: p.pmem,
-        mem_rss: p.mem_rss, started: p.started, state: p.state
-      }));
-
-    const payload = {
-      timestamp: new Date().toISOString(),
-      vm_id: VM_ID,
-      app_name: APP_NAME,
-      version: 'v1',
-      os_info: osInfo,
-      system_stats: {
-        cpu: { ...cpu, load: currentLoad.currentload, temperature: temp },
-        memory: mem, diskLayout: disk, filesystems: fs,
-        fsStats, diskIO, network: { stats: net }, load, uptime: uptime.uptime
-      },
-      process_stats: {
-        node: nodeProcess ? {
-          pid: nodeProcess.pid, cpu: nodeProcess.pcpu, memory: nodeProcess.mem_rss
-        } : null,
-        top: topProcesses,
-        total: processes.all
-      }
-    };
-
-    await pool.query(
-      `INSERT INTO vm_stats (timestamp, vm_id, app_name, version, os_info, system_stats, process_stats)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        payload.timestamp, payload.vm_id, payload.app_name, payload.version,
-        payload.os_info, payload.system_stats, payload.process_stats
-      ]
-    );
-
-    console.log(`[${payload.timestamp}] Stats written for ${APP_NAME} (${VM_ID})`);
-
-  } catch (err) {
-    console.error("Error collecting or sending stats:", err);
-  }
-}
-
-setInterval(collectStats, 2 * 60 * 1000);
-collectStats();
-
-
-
-
-
-
-CREATE TABLE IF NOT EXISTS vm_stats (
-    timestamp TIMESTAMPTZ NOT NULL,
-    vm_id TEXT NOT NULL,
-    app_name TEXT,
-    version TEXT,
-    os_info JSONB,
-    system_stats JSONB,
-    process_stats JSONB
-);
-SELECT create_hypertable('vm_stats', 'timestamp', if_not_exists => TRUE);
-
-
-
 {
-  "id": null,
-  "uid": "firecracker-vm-modern",
-  "title": "\ud83d\udd25 Firecracker VM - Modern Metrics View",
-  "timezone": "browser",
-  "schemaVersion": 36,
-  "version": 1,
-  "refresh": "30s",
-  "time": {
-    "from": "now-1h",
-    "to": "now"
-  },
-  "panels": [
-    {
-      "type": "timeseries",
-      "title": "\ud83d\udd25 CPU Usage per VM (%)",
-      "targets": [
-        {
-          "refId": "A",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       (system_stats->'cpu'->>'load')::FLOAT AS value \nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "drawStyle": "line",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 0,
-        "w": 12,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "\ud83e\udde0 Memory Usage per VM (%)",
-      "targets": [
-        {
-          "refId": "B",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       ((system_stats->'memory'->>'used')::FLOAT / NULLIF((system_stats->'memory'->>'total')::FLOAT, 0)) * 100 AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "drawStyle": "line",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 0,
-        "w": 12,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "\ud83d\udcbe Swap Usage per VM (%)",
-      "targets": [
-        {
-          "refId": "C",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       ((system_stats->'memory'->>'swapUsed')::FLOAT / NULLIF((system_stats->'memory'->>'swapTotal')::FLOAT, 0)) * 100 AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "drawStyle": "line",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 6,
-        "w": 12,
-        "h": 6
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "\ud83d\udfe2 Node.js CPU Usage (%)",
-      "targets": [
-        {
-          "refId": "D",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       (process_stats->'node'->>'cpu')::FLOAT AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 20,
-            "drawStyle": "line",
-            "spanNulls": true
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 6,
-        "w": 12,
-        "h": 6
-      }
-    },
-    {
-      "type": "stat",
-      "title": "\ud83d\udd22 Total Processes Running",
-      "targets": [
-        {
-          "refId": "E",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", vm_id, \n       (process_stats->>'total')::INT AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "none",
-          "decimals": 0,
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 12,
-        "w": 6,
-        "h": 5
-      }
-    },
-    {
-      "type": "bargauge",
-      "title": "\ud83c\udff7\ufe0f Top Processes by CPU (%)",
-      "targets": [
-        {
-          "refId": "F",
-          "format": "table",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", \n       (jsonb_array_elements(process_stats->'top')->>'name') AS metric,\n       (jsonb_array_elements(process_stats->'top')->>'cpu')::FLOAT AS value\nFROM vm_stats WHERE $__timeFilter(timestamp)\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "decimals": 1,
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "x": 6,
-        "y": 12,
-        "w": 18,
-        "h": 7
-      }
-    },
-    {
-      "type": "timeseries",
-      "title": "\ud83d\udce6 Disk Used % per VM",
-      "targets": [
-        {
-          "refId": "G",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT\n  timestamp AS \"time\",\n  vm_id,\n  ((jsonb_array_elements(system_stats->'filesystems')->>'used')::BIGINT / NULLIF((jsonb_array_elements(system_stats->'filesystems')->>'size')::BIGINT, 0)) * 100 AS value\nFROM vm_stats\nWHERE $__timeFilter(timestamp) AND vm_id IN (${vm_id:csv})\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "lineWidth": 2,
-            "fillOpacity": 15,
-            "drawStyle": "line",
-            "spanNulls": true
-          }
-        }
-      },
-      "gridPos": {
-        "x": 0,
-        "y": 19,
-        "w": 12,
-        "h": 6
-      }
-    },
-    {
-      "type": "stat",
-      "title": "\u23f1\ufe0f VM Uptime (Hours)",
-      "targets": [
-        {
-          "refId": "H",
-          "format": "time_series",
-          "datasource": {
-            "type": "postgres",
-            "uid": "bephxy1n23p4wd"
-          },
-          "rawSql": "\nSELECT timestamp AS \"time\", vm_id,\n       (system_stats->>'uptime')::BIGINT / 3600 AS value\nFROM vm_stats\nWHERE $__timeFilter(timestamp) AND vm_id IN (${vm_id:csv})\n"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "hours",
-          "color": {
-            "mode": "palette-classic"
-          },
-          "decimals": 2
-        }
-      },
-      "gridPos": {
-        "x": 12,
-        "y": 19,
-        "w": 12,
-        "h": 6
-      }
-    }
-  ],
-  "overwrite": true,
-  "templating": {
-    "list": [
+  "dashboard": {
+    "id": null,
+    "uid": "kvm-metrics",
+    "title": "KVM Metrics",
+    "timezone": "browser",
+    "schemaVersion": 38,
+    "version": 1,
+    "refresh": "30s",
+    "panels": [
       {
-        "name": "vm_id",
-        "type": "query",
-        "datasource": {
-          "type": "postgres",
-          "uid": "bephxy1n23p4wd"
+        "type": "timeseries",
+        "title": "CPU Usage (%)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  cpu_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  cpu_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  cpu_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  cpu_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent"
+          },
+          "overrides": []
         },
-        "definition": "SELECT DISTINCT vm_id FROM vm_stats ORDER BY vm_id",
-        "query": "SELECT DISTINCT vm_id FROM vm_stats ORDER BY vm_id",
-        "refresh": 1,
-        "label": "VM ID",
-        "includeAll": true,
-        "multi": true,
-        "hide": 0,
-        "current": {}
+        "gridPos": {
+          "x": 0,
+          "y": 0,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Memory Usage (%)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  memory_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  memory_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  memory_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  memory_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 0,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Swap Usage (%)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  swap_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  swap_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  swap_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  swap_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 6,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Disk Local Usage (%)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  data_local_disk_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  data_local_disk_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  data_local_disk_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  data_local_disk_used_percent::float AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "percent"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 6,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Disk Read (Bytes)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskReadBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskReadBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskReadBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskReadBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 12,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Disk Write (Bytes)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskWriteBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskWriteBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskWriteBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'diskWriteBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 12,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Network RX (Bytes)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkRxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkRxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkRxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkRxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 18,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Network TX (Bytes)",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkTxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkTxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkTxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (system_stats->>'networkTxBytes')::bigint AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "bytes"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 18,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Total Processes",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (process_stats->>'total')::int AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (process_stats->>'total')::int AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (process_stats->>'total')::int AS value\nFROM kvm_metrics\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  (process_stats->>'total')::int AS value\nFROM kvm_metrics\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 0,
+          "y": 24,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "timeseries",
+        "title": "Postgres Processes",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  count(*) FILTER (WHERE (process_stats->'list'->>0) IS NOT NULL AND (value->>'name') ILIKE '%postgres%') AS value\nFROM (\n  SELECT jsonb_array_elements(process_stats->'list') AS value, time, hostname\n  FROM kvm_metrics\n) sub\nGROUP BY time, hostname\nORDER BY time\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  count(*) FILTER (WHERE (process_stats->'list'->>0) IS NOT NULL AND (value->>'name') ILIKE '%postgres%') AS value\nFROM (\n  SELECT jsonb_array_elements(process_stats->'list') AS value, time, hostname\n  FROM kvm_metrics\n) sub\nGROUP BY time, hostname\nORDER BY time\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  count(*) FILTER (WHERE (process_stats->'list'->>0) IS NOT NULL AND (value->>'name') ILIKE '%postgres%') AS value\nFROM (\n  SELECT jsonb_array_elements(process_stats->'list') AS value, time, hostname\n  FROM kvm_metrics\n) sub\nGROUP BY time, hostname\nORDER BY time\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "time_series",
+            "rawSql": "\nSELECT\n  time AS \"time\",\n  hostname AS metric,\n  count(*) FILTER (WHERE (process_stats->'list'->>0) IS NOT NULL AND (value->>'name') ILIKE '%postgres%') AS value\nFROM (\n  SELECT jsonb_array_elements(process_stats->'list') AS value, time, hostname\n  FROM kvm_metrics\n) sub\nGROUP BY time, hostname\nORDER BY time\n"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "unit": "none"
+          },
+          "overrides": []
+        },
+        "gridPos": {
+          "x": 12,
+          "y": 24,
+          "w": 12,
+          "h": 6
+        }
+      },
+      {
+        "type": "table",
+        "title": "Top 10 Processes by CPU",
+        "targets": [
+          {
+            "refId": "CN",
+            "datasource": "pgmaker2_logger_cn",
+            "format": "table",
+            "rawSql": "\nSELECT * FROM (\n  SELECT hostname,\n         (jsonb_array_elements(process_stats->'list')->>'name') AS process,\n         (jsonb_array_elements(process_stats->'list')->>'cpu')::float AS cpu\n  FROM kvm_metrics\n) sub\nORDER BY cpu DESC\nLIMIT 10\n"
+          },
+          {
+            "refId": "HK",
+            "datasource": "pgmaker2_logger_hk",
+            "format": "table",
+            "rawSql": "\nSELECT * FROM (\n  SELECT hostname,\n         (jsonb_array_elements(process_stats->'list')->>'name') AS process,\n         (jsonb_array_elements(process_stats->'list')->>'cpu')::float AS cpu\n  FROM kvm_metrics\n) sub\nORDER BY cpu DESC\nLIMIT 10\n"
+          },
+          {
+            "refId": "UK",
+            "datasource": "pgmaker2_logger_uk",
+            "format": "table",
+            "rawSql": "\nSELECT * FROM (\n  SELECT hostname,\n         (jsonb_array_elements(process_stats->'list')->>'name') AS process,\n         (jsonb_array_elements(process_stats->'list')->>'cpu')::float AS cpu\n  FROM kvm_metrics\n) sub\nORDER BY cpu DESC\nLIMIT 10\n"
+          },
+          {
+            "refId": "US",
+            "datasource": "pgmaker2_logger_us",
+            "format": "table",
+            "rawSql": "\nSELECT * FROM (\n  SELECT hostname,\n         (jsonb_array_elements(process_stats->'list')->>'name') AS process,\n         (jsonb_array_elements(process_stats->'list')->>'cpu')::float AS cpu\n  FROM kvm_metrics\n) sub\nORDER BY cpu DESC\nLIMIT 10\n"
+          }
+        ],
+        "gridPos": {
+          "x": 0,
+          "y": 30,
+          "w": 24,
+          "h": 8
+        }
       }
-    ]
-  }
+    ],
+    "templating": {
+      "list": []
+    },
+    "annotations": {
+      "list": []
+    }
+  },
+  "overwrite": true
 }
