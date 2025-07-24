@@ -1,11 +1,11 @@
 {{ define "custom.pgmaker2.memory.alert" }}
 📛 **Memory Alert Triggered**
 
-🚨 **Database**: `{{ index .Labels "dbname" }}`
-💻 **Host**: `{{ index .Labels "hostname" }}`
+🚨 **Database**: `{{ .CommonLabels.dbname }}`
+💻 **Host**: `{{ .CommonLabels.hostname }}`
 📈 **Memory Usage**: More than **60%**
 
-🔗 [View Panel in Grafana]({{ .GeneratorURL }})
+🔗 [Grafana Panel Link]({{ .GeneratorURL }})
 
 🕒 **Triggered at**: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
 
