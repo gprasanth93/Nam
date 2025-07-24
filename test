@@ -1,12 +1,12 @@
-Advance Feature:
+{{ define "custom.pgmaker2.memory.alert" }}
+📛 **Memory Alert Triggered**
 
-No of standbys creation is taken into account to avoid overloading a single host.
+🚨 **Database**: `{{ index .Labels "dbname" }}`
+💻 **Host**: `{{ index .Labels "hostname" }}`
+📈 **Memory Usage**: More than **60%**
 
-pg_basebackup operations are rate-limited dynamically to minimize disk I/O impact.
+🔗 [View Panel in Grafana]({{ .GeneratorURL }})
 
-Auto archive cleanup based on disk usage metrics
+🕒 **Triggered at**: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
 
-
-Security:
-
-Resetting passwords every 24hours
+{{ end }}
