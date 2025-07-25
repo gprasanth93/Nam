@@ -1,12 +1,11 @@
-{{ define "custom.pgmaker2.memory.alert" }}
-📛 **Memory Alert Triggered**
-
-🚨 **Database**: `{{ .CommonLabels.dbname }}`
-💻 **Host**: `{{ .CommonLabels.hostname }}`
-📈 **Memory Usage**: More than **60%**
-
-🔗 [Grafana Panel Link]({{ .GeneratorURL }})
-
-🕒 **Triggered at**: {{ .StartsAt.Format "2006-01-02 15:04:05 MST" }}
-
+{{ define "pgmaker.alert" }}
+{
+  "alertname": "Memory usage >60% on {{ .Labels.hostname }} for DB {{ .Labels.dbname }}",
+  "summary": "Host '{{ .Labels.hostname }}' with database '{{ .Labels.dbname }}' is using high memory.",
+  "startsAt": "{{ .StartsAt }}",
+  "endsAt": "{{ .EndsAt }}",
+  "labels": {{ toJson .Labels }},
+  "annotations": {{ toJson .Annotations }},
+  "grafanaURL": "http://your-grafana-host:3000/alerting/alert-rules"
+}
 {{ end }}
