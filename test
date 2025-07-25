@@ -1,11 +1,56 @@
-{{ define "pgmaker.alert" }}
 {
-  "alertname": "Memory usage >60% on {{ .Labels.hostname }} for DB {{ .Labels.dbname }}",
-  "summary": "Host '{{ .Labels.hostname }}' with database '{{ .Labels.dbname }}' is using high memory.",
-  "startsAt": "{{ .StartsAt }}",
-  "endsAt": "{{ .EndsAt }}",
-  "labels": {{ toJson .Labels }},
-  "annotations": {{ toJson .Annotations }},
-  "grafanaURL": "http://your-grafana-host:3000/alerting/alert-rules"
+  "receiver": "{{ .Receiver }}",
+  "status": "{{ .Status }}",
+  "alerts": [
+    {{- range .Alerts }}
+    {
+      "status": "{{ .Status }}",
+      "labels": {
+        {{- range $k, $v := .Labels }}
+        "{{ $k }}": "{{ $v }}",
+        {{- end }}
+        "alertname": "MemoryAlert_{{ .Labels.hostname }}_{{ .Labels.dbname }}"
+      },
+      "annotations": {
+        {{- range $k, $v := .Annotations }}
+        "{{ $k }}": "{{ $v }}",
+        {{- end }}
+        "message": "Memory Usage exceeded 60% on KVM instance [{{ .Labels.hostname }}] for database [{{ .Labels.dbname }}]",
+        "summary": "High Memory Usage on KVM [{{ .Labels.hostname }}] for database [{{ .Labels.dbname }}]",
+        "grafana_link": "http://evolve-metrics-uat.systems.uk.hsbc:8080/d/cepy9ptjntse/pgmaker-kvm-metrics?orgId=1&var-database={{ .Labels.dbname }}&var-hostname={{ .Labels.hostname }}&from=now-6h&to=now"
+      },
+      "startsAt": "{{ .StartsAt }}",
+      "endsAt": "{{ .EndsAt }}",
+      "generatorURL": "{{ .GeneratorURL }}",
+      "fingerprint": "{{ .Fingerprint }}"
+    }
+    {{- if not (eq (add 1 . | printf "%d") (len $.Alerts | printf "%d")) }},{{ end }}
+    {{- end }}
+  ],
+  "groupLabels": {
+    {{- range $k, $v := .GroupLabels }}
+    "{{ $k }}": "{{ $v }}",
+    {{- end }}
+    "alertname": "MemoryAlert_{{ (index .Alerts 0).Labels.hostname }}_{{ (index .Alerts 0).Labels.dbname }}"
+  },
+  "commonLabels": {
+    {{- range $k, $v := .CommonLabels }}
+    "{{ $k }}": "{{ $v }}",
+    {{- end }}
+    "alertname": "MemoryAlert_{{ (index .Alerts 0).Labels.hostname }}_{{ (index .Alerts 0).Labels.dbname }}"
+  },
+  "commonAnnotations": {
+    "description": "Memory Usage exceeded 60% on KVM instance [{{ (index .Alerts 0).Labels.hostname }}] for database [{{ (index .Alerts 0).Labels.dbname }}]",
+    "message": "Memory Usage exceeded 60% on KVM instance [{{ (index .Alerts 0).Labels.hostname }}] for database [{{ (index .Alerts 0).Labels.dbname }}]",
+    "runbook_url": "https://edist-tools.uat.fx.gbm.cloud.uk.hsbc:12000/pgmaker2-dashboard/db/{{ (index .Alerts 0).Labels.dbname }}",
+    "summary": "High Memory Usage on KVM [{{ (index .Alerts 0).Labels.hostname }}] for database [{{ (index .Alerts 0).Labels.dbname }}"
+  },
+  "externalURL": "{{ .ExternalURL }}",
+  "version": "{{ .Version }}",
+  "groupKey": "{{ .GroupKey }}",
+  "truncatedAlerts": {{ .TruncatedAlerts }},
+  "orgId": {{ .OrgID }},
+  "title": "{{ .Title }}",
+  "state": "{{ .State }}",
+  "message": ""
 }
-{{ end }}
