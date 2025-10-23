@@ -1,6 +1,4 @@
-Perfect — adding the **sizing details** will help users understand how we decide their Firecracker VM configuration and build confidence that migrations are resource-appropriate and not random.
-
-Here’s the **revised and complete internal blog post**, updated to include the **sizing explanation**, in a friendly but transparent tone suitable for internal communication or Confluence.
+Awesome—here’s the **updated, user-friendly internal blog** with the new **dual-tier bucketing (Compute C* + Storage S*)** and clear sizing guidance. It keeps the original rollout plan (tiny DBs auto-migrate to UAT next week; a week later to Prod) and adds practical examples, including the “small compute + huge disk” case.
 
 ---
 
@@ -8,144 +6,154 @@ Here’s the **revised and complete internal blog post**, updated to include the
 
 **Dear PgMaker Users,**
 
-As part of our continuous modernization effort, we’re migrating all PgMaker databases to **Firecracker-based KVM environments**.
-This change will make your databases **faster, more secure, and more resource-efficient** — while preserving the same connectivity and management experience you’re used to.
-
-We’ll begin the rollout **next week**, starting with smaller UAT databases, and gradually move through production over the following weeks.
+We’re moving PgMaker databases to **Firecracker-based KVMs** to deliver **faster provisioning, stronger isolation, and more predictable performance**.
+The rollout starts **next week** with tiny/low-IO databases in **UAT** and advances to **Production** the following week. We’ll work closely with your teams during each migration window and monitor everything end-to-end.
 
 ---
 
-### 🔍 Why We’re Moving to Firecracker
+### 🗓️ Rollout at a Glance
 
-Firecracker KVMs are lightweight micro-virtual machines originally designed for high-performance, multi-tenant environments. They bring several key advantages to PgMaker:
+| Phase        | When            | Environment    | What Happens                                                                    |
+| ------------ | --------------- | -------------- | ------------------------------------------------------------------------------- |
+| **Phase 1**  | Next week       | **UAT**        | Automatic migration of **tiny / low-IO** databases to Firecracker KVM.          |
+| **Phase 2**  | +1 week         | **Prod**       | Automatic migration of **tiny / small** production databases.                   |
+| **Phase 3+** | Following weeks | **UAT + Prod** | Gradual migration of **medium/large** databases in coordination with app teams. |
 
-* ⚡ **Faster provisioning:** Databases start in seconds, not minutes.
-* 🔒 **Stronger isolation:** Each database runs in a fully sandboxed micro-VM.
-* ⚙️ **Predictable resource usage:** Dedicated CPU, memory, and IO rate limits prevent noisy-neighbor issues.
-* 💾 **Consistent performance:** Controlled disk and memory environments ensure steady query response times.
-* ☁️ **Elastic scaling:** Easy to scale up or down as workloads change.
-
-This upgrade enables PgMaker to serve 10,000+ databases reliably across business lines.
+We’ll notify owners before each cutover, validate post-migration, and keep a rollback path ready.
 
 ---
 
-### 🗓️ Migration Plan & Timeline
+## 🧮 How We Size: p95-Driven + Headroom
 
-We’ll follow a **phased rollout** to ensure smooth transition, validation, and minimal disruption.
-
-| Phase        | Timeline        | Environment          | Description                                                                                                                      |
-| ------------ | --------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| **Phase 1**  | Next Week       | **UAT**              | We’ll automatically migrate **tiny / low-IO databases** to Firecracker. This helps us validate performance under real workloads. |
-| **Phase 2**  | +1 Week         | **Production**       | Rollout of **tiny and small production databases**. These are low-impact workloads with predictable traffic.                     |
-| **Phase 3+** | Following Weeks | **All Environments** | Gradual migration of **medium and large databases**, coordinated with each application team for testing and timing.              |
-
-You’ll receive a short notification before your database’s migration window.
+We size each KVM using **real usage data** (p95 CPU, RAM, IO, IOPS, and DB size) over the last 7–14 days, then add **25–50% headroom** for maintenance (VACUUM, checkpoints, basebackups) and bursts.
+To make this clear and consistent, we’re adopting a **dual-tier model**—just like the public clouds.
 
 ---
 
-### 🧮 How We Decide Firecracker Sizing
+## 🧱 New Bucketing That Fits All: Compute + Storage (C*/S*)
 
-Each Firecracker KVM is provisioned using **actual performance data** from our existing monitoring dashboards (CPU, memory, IO rate, and database size).
-We classify databases into tiers to ensure fair resource allocation and cost-effective scaling:
+We assign **one Compute Class (C*)** and **one Storage Class (S*)** per database.
+This decouples CPU/RAM from disk capacity/performance—so edge cases like “2 vCPU / 2 GB RAM / 3 TB disk” are handled cleanly.
 
-| Tier            | Typical Workload         | vCPU | Memory | Disk Space | IO Rate (Sustained) |
-| --------------- | ------------------------ | ---- | ------ | ---------- | ------------------- |
-| **Tiny (T0)**   | Low traffic / Dev        | 2    | 3 GB   | 80 GB      | 6 MB/s              |
-| **Small (T1)**  | Small UAT / low-IO Prod  | 2    | 6 GB   | 160 GB     | 15 MB/s             |
-| **Medium (T2)** | Standard Production      | 4    | 12 GB  | 300 GB     | 35 MB/s             |
-| **Large (T3)**  | Heavier OLTP / Reporting | 6    | 24 GB  | 600 GB     | 75 MB/s             |
-| **XL (T4)**     | High-volume / Critical   | 8    | 48 GB  | 1 TB       | 120 MB/s            |
+### 🧠 Compute Classes (C*)
 
-The PgMaker platform automatically evaluates your database’s **average and peak usage (p95 metrics)** and assigns the right preset with extra headroom.
-If usage grows, we can **resize your KVM** without a full migration — simply by adjusting the configuration.
+Pick the smallest class that covers your **p95** CPU/RAM/connections; we provision with headroom.
 
-This ensures your database always runs with **just the right amount of compute, memory, and IO bandwidth**, avoiding both over-provisioning and resource starvation.
+| Class           | Target p95 vCPU | Target p95 RAM | Typical connections | Guidance                                        |
+| --------------- | --------------: | -------------: | ------------------: | ----------------------------------------------- |
+| **C0 – Tiny**   |            ≤0.2 |          ≤2 GB |                 ≤50 | Dev/low traffic. Requires pgBouncer (txn mode). |
+| **C1 – Small**  |         0.2–0.6 |         2–6 GB |              50–150 | Light prod / APIs.                              |
+| **C2 – Medium** |         0.6–1.2 |        6–12 GB |             150–300 | Standard prod OLTP.                             |
+| **C3 – Large**  |         1.2–2.5 |       12–24 GB |             300–600 | Heavier OLTP / reporting.                       |
+| **C4 – XL**     |            >2.5 |         >24 GB |                >600 | Hot/mission-critical.                           |
 
----
+**Provisioning rule of thumb**
 
-### 🤝 Working Together During Migration
-
-We’ll partner closely with every application and operations team to make this transition seamless:
-
-* Dedicated **PgMaker engineers** will monitor migrations live.
-* **Application owners** will be informed before and after each cutover.
-* **Rollback safety** is built-in — if anything looks off, we can instantly revert.
-* A **support channel** will be open throughout migration windows for real-time help.
-
-Your quick feedback during the first few days after migration will help us refine sizing and performance tuning for your workloads.
+* **vCPU** = `max(2, ceil(p95_cores × 1.5))`
+* **RAM** = `ceil(p95_ram_gib × 1.30 + 0.75)`
+  (If cache hit ratio <99% or swapping occurs, move up a class.)
 
 ---
 
-### 💡 What You Need to Do
+### 💾 Storage Classes (S*)
 
-For most users — **no manual action is required**.
+Choose independently based on **capacity needs** and **IO performance** (IOPS & MB/s).
+We keep WAL on a **small, fast** SSD class.
 
-All endpoints, credentials, and connection parameters remain identical.
-That said:
+| Class           | Capacity (DB+idx+WAL growth) | Perf (sustained) | Typical IOPS | Use case             |
+| --------------- | ---------------------------: | ---------------: | -----------: | -------------------- |
+| **S0 – Tiny**   |                       ≤80 GB |          ≤6 MB/s |        ~1.5k | Dev/UAT              |
+| **S1 – Small**  |                      ≤160 GB |         ≤15 MB/s |          ~3k | Small prod           |
+| **S2 – Medium** |                      ≤300 GB |         ≤35 MB/s |          ~7k | Standard prod        |
+| **S3 – Large**  |                      ≤600 GB |         ≤75 MB/s |         ~15k | Heavy OLTP/reporting |
+| **S4 – XL**     |                        ≤1 TB |        ≤120 MB/s |         ~24k | High-volume prod     |
+| **S5 – XXL**    |             >1 TB (2–10 TB+) |     120–500 MB/s |    24k–100k+ | Large/capacity-heavy |
 
-* Avoid major schema changes or heavy data loads during your scheduled window.
-* Report any noticeable latency or error changes via the PgMaker support channel.
-* Let us know early if your application has timing or connection-sensitive dependencies.
+**Provisioning rule of thumb**
 
----
+* **Capacity** = live data + indexes + **40–60%** + WAL + temp + snapshots.
+* **Throughput** = `ceil(p95_io_mb_s × 1.5)`; **Burst** ≈ `2× sustained` for 30–60s.
+* **IOPS (OLTP)** = `≥ 2–4 × p95_iops`.
+* **WAL class**:
 
-### 🧠 What Happens Behind the Scenes
+  * **W1 (standard fast SSD)** for most workloads
+  * **W2 (very fast SSD)** for write-heavy / latency-sensitive systems
 
-1. PgMaker creates a new Firecracker KVM with your assigned spec.
-2. Your database is **replicated from current VM to the new KVM** using streaming replication.
-3. After catching up, the new KVM is **promoted** and becomes your new primary.
-4. The old instance remains as a standby until post-migration checks complete.
-
-This process is fully automated and designed for **zero data loss and minimal downtime** (usually under 1 minute).
-
----
-
-### 📊 Monitoring After Migration
-
-You can continue viewing all key metrics on the familiar **PgMaker Metrics Dashboard**, now enhanced with:
-
-* Faster refresh intervals
-* Accurate IO and CPU rate limits per KVM
-* Disk utilization and WAL statistics
-
-We’ll also share performance summaries comparing pre- and post-migration results.
+> This mirrors what major clouds provide (e.g., AWS **gp3/io2**, Azure **Premium SSD v2/Ultra**, GCP **Hyperdisk**)—performance can be tuned **independent of disk size**.
 
 ---
 
-### 🌱 What’s Next
+## 🧩 Examples (How C*/S* lands in real life)
 
-After completing the tiny and small migrations:
+* **Small compute, huge data (edge case)**
+  *2 vCPU, 2–4 GB RAM, 3 TB disk, light IO* → **C0 + S5**, WAL **W1/W2**
 
-* Medium and large workloads will follow, scheduled with their application owners.
-* Automatic Firecracker right-sizing will roll out based on live metrics.
-* Improved performance dashboards will display per-tier resource consumption.
-
-Our end goal is a **self-optimizing, scalable PgMaker platform** that can handle thousands of databases reliably and predictably.
+  * Compute stays small; storage gives big capacity with enough throughput (e.g., 250–500 MB/s) so maintenance jobs don’t stall.
+* **Standard OLTP**
+  *4 vCPU, 8–12 GB RAM, 200–300 GB, ~20–30 MB/s p95* → **C2 + S2**, WAL **W2**
+* **Reporting-heavy scans**
+  *6 vCPU, 24 GB RAM, 1 TB, high sequential reads* → **C3 + S4**, prioritize throughput.
 
 ---
 
-### 🧭 Need Help or Have Concerns?
+## 🛠️ What Happens During Migration
 
-We’re here to make this smooth:
+1. PgMaker spins up a Firecracker KVM sized by your **C*+S*** class.
+2. We seed it via **streaming replication** from your current instance.
+3. After catch-up, we **promote** the KVM and **switch traffic** (brief interruption, usually <1 minute).
+4. The old instance stays as **standby** until verification is done.
 
-* 📩 Contact **PgMaker Support** at *[insert email/Slack channel]*
-* 📊 Track migration progress on *[pgmaker-kvm-tracker URL]*
-* 💬 Join the upcoming **PgMaker Firecracker Info Session** on *[Date & Time]*
+No endpoint or credential changes are required. We’ll watch metrics closely for 48–72 hours and adjust C*/S* if needed.
+
+---
+
+## 📊 After Migration: Visibility & Tuning
+
+* Your DB shows up in the **PgMaker Metrics Dashboard** with the new KVM stats (CPU, RAM, disk throughput/IOPS, WAL, checkpoints).
+* If we detect IO throttling >10%, low cache hit, or vacuum/checkpoint warnings, we’ll **propose a class bump** (e.g., S2→S3 or C1→C2).
+
+---
+
+## ✅ What You Need to Do
+
+* No manual action required for most teams.
+* Avoid heavy schema changes during your scheduled window.
+* Report any latency or error anomalies to **PgMaker Support** immediately.
+* If your app has special timing/dependency constraints, ping us in advance.
+
+---
+
+## ❓FAQ (Short)
+
+**Q: Will performance improve immediately?**
+**A:** Typically yes—especially latency consistency—thanks to better isolation and tuned IO limits.
+
+**Q: Can we resize without another migration?**
+**A:** Yes. We can adjust compute and storage classes (C*/S*) in-place.
+
+**Q: We have tiny compute but multi-TB data—are we forced to buy big VMs?**
+**A:** No. That’s the point of C*/S*: **small compute + large, right-sized storage**.
+
+---
+
+## 🧭 Need Help?
+
+* 📩 **PgMaker Support**: *[team email / Slack channel]*
+* 📊 **Rollout Tracker**: *[Confluence/Jira/URL]*
+* 🗓️ **Info Session**: *[Date & Time]* (short walkthrough + Q&A)
 
 ---
 
 ### ✨ In Summary
 
-* Migration to Firecracker starts **next week** in **UAT**
-* Production migrations begin **a week later**
-* Each database is right-sized using real usage data
-* No endpoint or credential changes required
-* Expect **better performance, stability, and isolation**
-
-We appreciate your collaboration and enthusiasm as PgMaker continues to evolve into a high-performance, future-ready database platform.
+* **Next week:** tiny/low-IO DBs auto-migrate to **UAT**;
+* **Following week:** same group auto-migrates to **Prod**;
+* We size with a **dual-tier model (C*/S*)** using your **p95 metrics + headroom**;
+* No user changes needed; we partner closely during cutovers;
+* Expect **better isolation, steadier latency, and right-sized cost**.
 
 **– The PgMaker Engineering Team**
 
 ---
 
-Would you like me to now convert this into a **Confluence version** (with colored info boxes, emojis, and collapsible sections) or an **HTML/email announcement** layout (for Outlook or internal newsletters)?
+Want this formatted for **Confluence** (callouts, collapsible “Details” sections) or **email/HTML**? I can output a ready-to-paste version in your preferred format.
