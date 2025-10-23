@@ -1,214 +1,151 @@
-Perfect—thanks for the schema photo. Below is a ready-to-run migration + hourly rotation pack tailored to your public.logs table (UUID PK, quoted "timestamp", hostname, database, etc.). It:
-	1.	creates an hourly-partitioned replacement,
-	2.	pre-creates the needed hour partitions,
-	3.	moves the last 2 hours from the old table, deletes those rows from the old table in safe batches,
-	4.	atomically swaps names so apps keep using public.logs, and
-	5.	installs a pg_cron rotation to create future partitions and drop old ones by retention.
+Perfect — adding the **sizing details** will help users understand how we decide their Firecracker VM configuration and build confidence that migrations are resource-appropriate and not random.
 
-Adjust the RETENTION_HOURS near the bottom to what you want (example keeps 7 days = 168 hours).
+Here’s the **revised and complete internal blog post**, updated to include the **sizing explanation**, in a friendly but transparent tone suitable for internal communication or Confluence.
 
-⸻
+---
 
-0) One-time: functions to manage hourly partitions
+## 🚀 Upcoming Database Migration to KVM Firecracker – What You Need to Know
 
--- 0.a  Create a child for the given hour: [hour, hour+1h)
-CREATE OR REPLACE FUNCTION public.ensure_hour_partition(_parent regclass, _hour timestamptz)
-RETURNS void
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  from_ts timestamptz := date_trunc('hour', _hour);
-  to_ts   timestamptz := from_ts + interval '1 hour';
-  part_name text := format('%s_%s',
-                           _parent::text,
-                           to_char(from_ts AT TIME ZONE 'UTC','YYYYMMDD_HH24'));
-BEGIN
-  EXECUTE format($fmt$
-    CREATE TABLE IF NOT EXISTS %I PARTITION OF %s
-    FOR VALUES FROM (%L) TO (%L)
-  $fmt$, part_name, _parent, from_ts, to_ts);
-END$$;
+**Dear PgMaker Users,**
 
+As part of our continuous modernization effort, we’re migrating all PgMaker databases to **Firecracker-based KVM environments**.
+This change will make your databases **faster, more secure, and more resource-efficient** — while preserving the same connectivity and management experience you’re used to.
 
--- 0.b  Drop partitions older than cutoff (by lower bound), accurate & name-agnostic
-CREATE OR REPLACE FUNCTION public.drop_old_hour_partitions(_parent regclass, _retain_hours int)
-RETURNS int
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  cutoff timestamptz := date_trunc('hour', now()) - make_interval(hours => _retain_hours);
-  r record;
-  dropped int := 0;
-BEGIN
-  FOR r IN
-    SELECT c.oid::regclass AS child,
-           regexp_match(pg_get_expr(c.relpartbound, c.oid), '\(([^,]+),')[1]::timestamptz AS lower_bound
-    FROM pg_inherits i
-    JOIN pg_class   c ON c.oid = i.inhrelid
-    WHERE i.inhparent = _parent
-  LOOP
-    IF r.lower_bound < cutoff THEN
-      EXECUTE format('DROP TABLE IF EXISTS %s', r.child);
-      dropped := dropped + 1;
-    END IF;
-  END LOOP;
-  RETURN dropped;
-END$$;
+We’ll begin the rollout **next week**, starting with smaller UAT databases, and gradually move through production over the following weeks.
 
+---
 
--- 0.c  Hourly rotation entrypoint (ensure current/next, drop old, analyze)
-CREATE OR REPLACE PROCEDURE public.rotate_hourly_partitions(_parent regclass, _retain_hours int)
-LANGUAGE plpgsql
-AS $$
-DECLARE
-  curr_hour timestamptz := date_trunc('hour', now());
-BEGIN
-  PERFORM public.ensure_hour_partition(_parent, curr_hour);
-  PERFORM public.ensure_hour_partition(_parent, curr_hour + interval '1 hour');
-  PERFORM public.drop_old_hour_partitions(_parent, _retain_hours);
-  EXECUTE format('ANALYZE %s', _parent);
-END$$;
+### 🔍 Why We’re Moving to Firecracker
 
+Firecracker KVMs are lightweight micro-virtual machines originally designed for high-performance, multi-tenant environments. They bring several key advantages to PgMaker:
 
-⸻
+* ⚡ **Faster provisioning:** Databases start in seconds, not minutes.
+* 🔒 **Stronger isolation:** Each database runs in a fully sandboxed micro-VM.
+* ⚙️ **Predictable resource usage:** Dedicated CPU, memory, and IO rate limits prevent noisy-neighbor issues.
+* 💾 **Consistent performance:** Controlled disk and memory environments ensure steady query response times.
+* ☁️ **Elastic scaling:** Easy to scale up or down as workloads change.
 
-1) Create the new partitioned parent logs_p (same columns, hourly range)
+This upgrade enables PgMaker to serve 10,000+ databases reliably across business lines.
 
-BEGIN;
+---
 
--- Parent with identical columns/constraints/defaults as your current table
-CREATE TABLE IF NOT EXISTS public.logs_p (
-  rowid uuid NOT NULL DEFAULT uuid_in(md5(random()::text || clock_timestamp()::text)::cstring),
-  "timestamp" timestamptz NULL,
-  hostname varchar(255) NULL,
-  "label" varchar(255) NULL,
-  "database" varchar(255) NULL,
-  metadata jsonb NULL,
-  message text NULL,
-  CONSTRAINT logs_p_pkey PRIMARY KEY (rowid)
-) PARTITION BY RANGE ("timestamp");
+### 🗓️ Migration Plan & Timeline
 
--- Partitioned (inherited) indexes. Postgres will create child indexes per partition.
-CREATE INDEX IF NOT EXISTS logs_p_ts_btree     ON public.logs_p ("timestamp");
-CREATE INDEX IF NOT EXISTS logs_p_hostname_idx ON public.logs_p (hostname);
-CREATE INDEX IF NOT EXISTS logs_p_database_idx ON public.logs_p ("database");
+We’ll follow a **phased rollout** to ensure smooth transition, validation, and minimal disruption.
 
-COMMIT;
+| Phase        | Timeline        | Environment          | Description                                                                                                                      |
+| ------------ | --------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| **Phase 1**  | Next Week       | **UAT**              | We’ll automatically migrate **tiny / low-IO databases** to Firecracker. This helps us validate performance under real workloads. |
+| **Phase 2**  | +1 Week         | **Production**       | Rollout of **tiny and small production databases**. These are low-impact workloads with predictable traffic.                     |
+| **Phase 3+** | Following Weeks | **All Environments** | Gradual migration of **medium and large databases**, coordinated with each application team for testing and timing.              |
 
+You’ll receive a short notification before your database’s migration window.
 
-⸻
+---
 
-2) Pre-create partitions for the last 2 hours, current, and next hour
+### 🧮 How We Decide Firecracker Sizing
 
-DO $$
-DECLARE
-  h timestamptz := date_trunc('hour', now()) - interval '2 hour';
-  stop timestamptz := date_trunc('hour', now()) + interval '1 hour';
-BEGIN
-  WHILE h <= stop LOOP
-    PERFORM public.ensure_hour_partition('public.logs_p'::regclass, h);
-    h := h + interval '1 hour';
-  END LOOP;
-END$$;
+Each Firecracker KVM is provisioned using **actual performance data** from our existing monitoring dashboards (CPU, memory, IO rate, and database size).
+We classify databases into tiers to ensure fair resource allocation and cost-effective scaling:
 
+| Tier            | Typical Workload         | vCPU | Memory | Disk Space | IO Rate (Sustained) |
+| --------------- | ------------------------ | ---- | ------ | ---------- | ------------------- |
+| **Tiny (T0)**   | Low traffic / Dev        | 2    | 3 GB   | 80 GB      | 6 MB/s              |
+| **Small (T1)**  | Small UAT / low-IO Prod  | 2    | 6 GB   | 160 GB     | 15 MB/s             |
+| **Medium (T2)** | Standard Production      | 4    | 12 GB  | 300 GB     | 35 MB/s             |
+| **Large (T3)**  | Heavier OLTP / Reporting | 6    | 24 GB  | 600 GB     | 75 MB/s             |
+| **XL (T4)**     | High-volume / Critical   | 8    | 48 GB  | 1 TB       | 120 MB/s            |
 
-⸻
+The PgMaker platform automatically evaluates your database’s **average and peak usage (p95 metrics)** and assigns the right preset with extra headroom.
+If usage grows, we can **resize your KVM** without a full migration — simply by adjusting the configuration.
 
-3) Move the last 2 hours from old public.logs into public.logs_p,
+This ensures your database always runs with **just the right amount of compute, memory, and IO bandwidth**, avoiding both over-provisioning and resource starvation.
 
-then delete from old in safe batches
+---
 
--- 3.a Insert the last 2 hours (adjust window if you like)
-WITH win AS (
-  SELECT date_trunc('hour', now()) - interval '2 hour' AS start_ts,
-         date_trunc('hour', now())                     AS end_ts
-)
-INSERT INTO public.logs_p
-SELECT l.*
-FROM public.logs l
-JOIN win w ON l."timestamp" >= w.start_ts AND l."timestamp" < w.end_ts;
+### 🤝 Working Together During Migration
 
--- 3.b Batched delete from old table (keeps WAL/vacuum sane). Re-run until 0 rows.
-DO $$
-DECLARE
-  batch_count int;
-BEGIN
-  LOOP
-    WITH victim AS (
-      SELECT ctid
-      FROM public.logs
-      WHERE "timestamp" >= date_trunc('hour', now()) - interval '2 hour'
-        AND "timestamp" <  date_trunc('hour', now())
-      LIMIT 50000
-    )
-    DELETE FROM public.logs l
-    USING victim v
-    WHERE l.ctid = v.ctid
-    RETURNING 1
-    INTO batch_count;
+We’ll partner closely with every application and operations team to make this transition seamless:
 
-    EXIT WHEN NOT FOUND;  -- no more rows in the window
-    PERFORM pg_sleep(0.05); -- tiny breather for autovacuum
-  END LOOP;
-END$$;
+* Dedicated **PgMaker engineers** will monitor migrations live.
+* **Application owners** will be informed before and after each cutover.
+* **Rollback safety** is built-in — if anything looks off, we can instantly revert.
+* A **support channel** will be open throughout migration windows for real-time help.
 
--- Optional stats refresh
-VACUUM (ANALYZE) public.logs_p;
+Your quick feedback during the first few days after migration will help us refine sizing and performance tuning for your workloads.
 
+---
 
-⸻
+### 💡 What You Need to Do
 
-4) Atomic swap: make partitioned table become public.logs
+For most users — **no manual action is required**.
 
-BEGIN;
-LOCK TABLE public.logs IN ACCESS EXCLUSIVE MODE;
+All endpoints, credentials, and connection parameters remain identical.
+That said:
 
--- Keep a dated backup name for the old heap
-ALTER TABLE public.logs RENAME TO logs_old_utc_||
-to_char((now() AT TIME ZONE 'UTC'),'YYYYMMDD_HH24MISS');  -- (run as two statements)
+* Avoid major schema changes or heavy data loads during your scheduled window.
+* Report any noticeable latency or error changes via the PgMaker support channel.
+* Let us know early if your application has timing or connection-sensitive dependencies.
 
--- PostgreSQL doesn’t allow concatenation inside ALTER; do it explicitly:
--- Example:
--- ALTER TABLE public.logs RENAME TO logs_old_20250915_221530;
+---
 
-ALTER TABLE public.logs_p RENAME TO logs;
+### 🧠 What Happens Behind the Scenes
 
--- Fix index/constraint names if you care about exact names (optional)
--- (The partitioned indexes/PK already moved with the parent.)
+1. PgMaker creates a new Firecracker KVM with your assigned spec.
+2. Your database is **replicated from current VM to the new KVM** using streaming replication.
+3. After catching up, the new KVM is **promoted** and becomes your new primary.
+4. The old instance remains as a standby until post-migration checks complete.
 
-COMMIT;
+This process is fully automated and designed for **zero data loss and minimal downtime** (usually under 1 minute).
 
-If you want me to emit the exact RENAME TO logs_old_YYYYMMDD_HHMMSS line based on your clock, just say the word and I’ll format it.
+---
 
-⸻
+### 📊 Monitoring After Migration
 
-5) Schedule pg_cron to rotate hourly & drop old partitions
+You can continue viewing all key metrics on the familiar **PgMaker Metrics Dashboard**, now enhanced with:
 
--- Choose your retention here:
--- e.g., keep 7 days of logs => 168 hours
-DO $$ BEGIN
-  PERFORM cron.schedule(
-    'logs_partition_rotate_hourly',
-    '1 * * * *',   -- at minute 01 of every hour
-    $$CALL public.rotate_hourly_partitions('public.logs'::regclass, 168);$$
-  );
-EXCEPTION WHEN unique_violation THEN
-  -- job already exists: update it
-  PERFORM cron.update(job_name := 'logs_partition_rotate_hourly',
-                      schedule := '1 * * * *',
-                      command  := $$CALL public.rotate_hourly_partitions('public.logs'::regclass, 168);$$);
-END$$;
+* Faster refresh intervals
+* Accurate IO and CPU rate limits per KVM
+* Disk utilization and WAL statistics
 
+We’ll also share performance summaries comparing pre- and post-migration results.
 
-⸻
+---
 
-Notes / knobs
-	•	Your column is literally named "timestamp"; the script keeps it quoted everywhere.
-	•	Because the PK is a UUID (no sequence), there’s no sequence work to do.
-	•	If you also log heavily on hostname/database filters, keeping those partitioned indexes is fine. If space is tight, drop whichever you don’t query.
-	•	For very high ingest, consider adding a BRIN on "timestamp" on each child too (cheap):
-CREATE INDEX IF NOT EXISTS logs_p_ts_brin ON public.logs_p USING brin ("timestamp");
+### 🌱 What’s Next
 
-⸻
+After completing the tiny and small migrations:
 
-If you share the exact old table name you want for step 4 (e.g., logs_old_20250915_2000), I’ll emit the literal swap block so you can paste it verbatim.
+* Medium and large workloads will follow, scheduled with their application owners.
+* Automatic Firecracker right-sizing will roll out based on live metrics.
+* Improved performance dashboards will display per-tier resource consumption.
+
+Our end goal is a **self-optimizing, scalable PgMaker platform** that can handle thousands of databases reliably and predictably.
+
+---
+
+### 🧭 Need Help or Have Concerns?
+
+We’re here to make this smooth:
+
+* 📩 Contact **PgMaker Support** at *[insert email/Slack channel]*
+* 📊 Track migration progress on *[pgmaker-kvm-tracker URL]*
+* 💬 Join the upcoming **PgMaker Firecracker Info Session** on *[Date & Time]*
+
+---
+
+### ✨ In Summary
+
+* Migration to Firecracker starts **next week** in **UAT**
+* Production migrations begin **a week later**
+* Each database is right-sized using real usage data
+* No endpoint or credential changes required
+* Expect **better performance, stability, and isolation**
+
+We appreciate your collaboration and enthusiasm as PgMaker continues to evolve into a high-performance, future-ready database platform.
+
+**– The PgMaker Engineering Team**
+
+---
+
+Would you like me to now convert this into a **Confluence version** (with colored info boxes, emojis, and collapsible sections) or an **HTML/email announcement** layout (for Outlook or internal newsletters)?
