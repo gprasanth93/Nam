@@ -1,159 +1,97 @@
-Awesome—here’s the **updated, user-friendly internal blog** with the new **dual-tier bucketing (Compute C* + Storage S*)** and clear sizing guidance. It keeps the original rollout plan (tiny DBs auto-migrate to UAT next week; a week later to Prod) and adds practical examples, including the “small compute + huge disk” case.
+Totally doable—add a tiny formatter and use it in the IO cell.
 
----
+1) Add these helpers (top of the file, above the component)
 
-## 🚀 Upcoming Database Migration to KVM Firecracker – What You Need to Know
+// Format a rate that is stored in KB/s to KB/s, MB/s, or GB/s
+function rateFromKBps(vKBps = 0) {
+  const a = Math.abs(vKBps);
+  if (a >= 1024 * 1024) return { val: vKBps / (1024 * 1024), unit: "GB/s" };
+  if (a >= 1024)        return { val: vKBps / 1024,           unit: "MB/s" };
+  return { val: vKBps, unit: "KB/s" };
+}
 
-**Dear PgMaker Users,**
+// If your source is **bytes/s**, use this instead:
+// function rateFromBps(vBps = 0) {
+//   const KBps = vBps / 1024;
+//   return rateFromKBps(KBps);
+// }
 
-We’re moving PgMaker databases to **Firecracker-based KVMs** to deliver **faster provisioning, stronger isolation, and more predictable performance**.
-The rollout starts **next week** with tiny/low-IO databases in **UAT** and advances to **Production** the following week. We’ll work closely with your teams during each migration window and monitor everything end-to-end.
+function fmt(n, maxFrac = 1) {
+  return Number(n || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: maxFrac,
+  });
+}
 
----
+2) Make your Seg accept custom display strings
 
-### 🗓️ Rollout at a Glance
+Replace your Seg with this version (keeps bars but lets you print any text next to them):
 
-| Phase        | When            | Environment    | What Happens                                                                    |
-| ------------ | --------------- | -------------- | ------------------------------------------------------------------------------- |
-| **Phase 1**  | Next week       | **UAT**        | Automatic migration of **tiny / low-IO** databases to Firecracker KVM.          |
-| **Phase 2**  | +1 week         | **Prod**       | Automatic migration of **tiny / small** production databases.                   |
-| **Phase 3+** | Following weeks | **UAT + Prod** | Gradual migration of **medium/large** databases in coordination with app teams. |
+function Seg({
+  label,
+  leftValue,
+  rightValue,
+  unit = "%",
+  leftName = "",
+  rightName = "",
+  leftText,   // if provided, shown instead of `${leftValue}${unit}`
+  rightText,  // if provided, shown instead of `${rightValue}${unit}`
+}) {
+  const leftMain  = leftText  ?? `${Math.round(leftValue)}${unit}`;
+  const rightMain = rightText ?? `${Math.round(rightValue)}${unit}`;
 
-We’ll notify owners before each cutover, validate post-migration, and keep a rollback path ready.
+  return (
+    <Stack gap={6}>
+      <Text size="xs" c="dimmed">{label}</Text>
 
----
+      <Group justify="space-between" align="center">
+        <Group gap={4} wrap="nowrap" align="baseline">
+          <Text fz={12} c="teal" fw={700} lh={1}>{leftMain}</Text>
+          {leftName && <Text span fz={10} c="teal.4" fw={600} lh={1}>{leftName}</Text>}
+        </Group>
+        <Group gap={4} wrap="nowrap" align="baseline">
+          <Text fz={12} c="red" fw={700} lh={1}>{rightMain}</Text>
+          {rightName && <Text span fz={10} c="red.4" fw={600} lh={1}>{rightName}</Text>}
+        </Group>
+      </Group>
 
-## 🧮 How We Size: p95-Driven + Headroom
+      <Progress.Root size="xs">
+        <Progress.Section value={leftValue}  color="green" />
+        <Progress.Section value={rightValue} color="red" />
+      </Progress.Root>
+    </Stack>
+  );
+}
 
-We size each KVM using **real usage data** (p95 CPU, RAM, IO, IOPS, and DB size) over the last 7–14 days, then add **25–50% headroom** for maintenance (VACUUM, checkpoints, basebackups) and bursts.
-To make this clear and consistent, we’re adopting a **dual-tier model**—just like the public clouds.
+3) Use it in the IO column
 
----
+Where you render the IO cell in your table row, compute the display strings once and pass them:
 
-## 🧱 New Bucketing That Fits All: Compute + Storage (C*/S*)
+// Assuming your row has p95 write/read rates in KB/s:
+const wKBps = Number(r.ioWriteKBps ?? r.ioWriteKBs ?? 0); // adapt to your field name
+const rKBps = Number(r.ioReadKBps  ?? r.ioReadKBs  ?? 0);
 
-We assign **one Compute Class (C*)** and **one Storage Class (S*)** per database.
-This decouples CPU/RAM from disk capacity/performance—so edge cases like “2 vCPU / 2 GB RAM / 3 TB disk” are handled cleanly.
+// Convert to nice units
+const wRate = rateFromKBps(wKBps);
+const rRate = rateFromKBps(rKBps);
 
-### 🧠 Compute Classes (C*)
+// Text to show next to the bars
+const wText = `${fmt(wRate.val)} ${wRate.unit}`;
+const rText = `${fmt(rRate.val)} ${rRate.unit}`;
 
-Pick the smallest class that covers your **p95** CPU/RAM/connections; we provision with headroom.
+// Your percent bars (0–100) stay as you already compute them:
+const wPct = Math.max(0, Math.min(100, r.ioWritePct ?? 0));
+const rPct = Math.max(0, Math.min(100, r.ioReadPct  ?? 0));
 
-| Class           | Target p95 vCPU | Target p95 RAM | Typical connections | Guidance                                        |
-| --------------- | --------------: | -------------: | ------------------: | ----------------------------------------------- |
-| **C0 – Tiny**   |            ≤0.2 |          ≤2 GB |                 ≤50 | Dev/low traffic. Requires pgBouncer (txn mode). |
-| **C1 – Small**  |         0.2–0.6 |         2–6 GB |              50–150 | Light prod / APIs.                              |
-| **C2 – Medium** |         0.6–1.2 |        6–12 GB |             150–300 | Standard prod OLTP.                             |
-| **C3 – Large**  |         1.2–2.5 |       12–24 GB |             300–600 | Heavier OLTP / reporting.                       |
-| **C4 – XL**     |            >2.5 |         >24 GB |                >600 | Hot/mission-critical.                           |
+/* ...inside <Table.Td> for IO... */
+<Seg
+  label="IO p95"
+  leftValue={wPct}
+  rightValue={rPct}
+  leftText={wText}
+  rightText={rText}
+  leftName="Write"
+  rightName="Read"
+/>
 
-**Provisioning rule of thumb**
-
-* **vCPU** = `max(2, ceil(p95_cores × 1.5))`
-* **RAM** = `ceil(p95_ram_gib × 1.30 + 0.75)`
-  (If cache hit ratio <99% or swapping occurs, move up a class.)
-
----
-
-### 💾 Storage Classes (S*)
-
-Choose independently based on **capacity needs** and **IO performance** (IOPS & MB/s).
-We keep WAL on a **small, fast** SSD class.
-
-| Class           | Capacity (DB+idx+WAL growth) | Perf (sustained) | Typical IOPS | Use case             |
-| --------------- | ---------------------------: | ---------------: | -----------: | -------------------- |
-| **S0 – Tiny**   |                       ≤80 GB |          ≤6 MB/s |        ~1.5k | Dev/UAT              |
-| **S1 – Small**  |                      ≤160 GB |         ≤15 MB/s |          ~3k | Small prod           |
-| **S2 – Medium** |                      ≤300 GB |         ≤35 MB/s |          ~7k | Standard prod        |
-| **S3 – Large**  |                      ≤600 GB |         ≤75 MB/s |         ~15k | Heavy OLTP/reporting |
-| **S4 – XL**     |                        ≤1 TB |        ≤120 MB/s |         ~24k | High-volume prod     |
-| **S5 – XXL**    |             >1 TB (2–10 TB+) |     120–500 MB/s |    24k–100k+ | Large/capacity-heavy |
-
-**Provisioning rule of thumb**
-
-* **Capacity** = live data + indexes + **40–60%** + WAL + temp + snapshots.
-* **Throughput** = `ceil(p95_io_mb_s × 1.5)`; **Burst** ≈ `2× sustained` for 30–60s.
-* **IOPS (OLTP)** = `≥ 2–4 × p95_iops`.
-* **WAL class**:
-
-  * **W1 (standard fast SSD)** for most workloads
-  * **W2 (very fast SSD)** for write-heavy / latency-sensitive systems
-
-> This mirrors what major clouds provide (e.g., AWS **gp3/io2**, Azure **Premium SSD v2/Ultra**, GCP **Hyperdisk**)—performance can be tuned **independent of disk size**.
-
----
-
-## 🧩 Examples (How C*/S* lands in real life)
-
-* **Small compute, huge data (edge case)**
-  *2 vCPU, 2–4 GB RAM, 3 TB disk, light IO* → **C0 + S5**, WAL **W1/W2**
-
-  * Compute stays small; storage gives big capacity with enough throughput (e.g., 250–500 MB/s) so maintenance jobs don’t stall.
-* **Standard OLTP**
-  *4 vCPU, 8–12 GB RAM, 200–300 GB, ~20–30 MB/s p95* → **C2 + S2**, WAL **W2**
-* **Reporting-heavy scans**
-  *6 vCPU, 24 GB RAM, 1 TB, high sequential reads* → **C3 + S4**, prioritize throughput.
-
----
-
-## 🛠️ What Happens During Migration
-
-1. PgMaker spins up a Firecracker KVM sized by your **C*+S*** class.
-2. We seed it via **streaming replication** from your current instance.
-3. After catch-up, we **promote** the KVM and **switch traffic** (brief interruption, usually <1 minute).
-4. The old instance stays as **standby** until verification is done.
-
-No endpoint or credential changes are required. We’ll watch metrics closely for 48–72 hours and adjust C*/S* if needed.
-
----
-
-## 📊 After Migration: Visibility & Tuning
-
-* Your DB shows up in the **PgMaker Metrics Dashboard** with the new KVM stats (CPU, RAM, disk throughput/IOPS, WAL, checkpoints).
-* If we detect IO throttling >10%, low cache hit, or vacuum/checkpoint warnings, we’ll **propose a class bump** (e.g., S2→S3 or C1→C2).
-
----
-
-## ✅ What You Need to Do
-
-* No manual action required for most teams.
-* Avoid heavy schema changes during your scheduled window.
-* Report any latency or error anomalies to **PgMaker Support** immediately.
-* If your app has special timing/dependency constraints, ping us in advance.
-
----
-
-## ❓FAQ (Short)
-
-**Q: Will performance improve immediately?**
-**A:** Typically yes—especially latency consistency—thanks to better isolation and tuned IO limits.
-
-**Q: Can we resize without another migration?**
-**A:** Yes. We can adjust compute and storage classes (C*/S*) in-place.
-
-**Q: We have tiny compute but multi-TB data—are we forced to buy big VMs?**
-**A:** No. That’s the point of C*/S*: **small compute + large, right-sized storage**.
-
----
-
-## 🧭 Need Help?
-
-* 📩 **PgMaker Support**: *[team email / Slack channel]*
-* 📊 **Rollout Tracker**: *[Confluence/Jira/URL]*
-* 🗓️ **Info Session**: *[Date & Time]* (short walkthrough + Q&A)
-
----
-
-### ✨ In Summary
-
-* **Next week:** tiny/low-IO DBs auto-migrate to **UAT**;
-* **Following week:** same group auto-migrates to **Prod**;
-* We size with a **dual-tier model (C*/S*)** using your **p95 metrics + headroom**;
-* No user changes needed; we partner closely during cutovers;
-* Expect **better isolation, steadier latency, and right-sized cost**.
-
-**– The PgMaker Engineering Team**
-
----
-
-Want this formatted for **Confluence** (callouts, collapsible “Details” sections) or **email/HTML**? I can output a ready-to-paste version in your preferred format.
+That’s it. Now 69350 KB/s becomes 67.8 MB/s, 1 230 263 KB/s becomes 1.17 GB/s, etc., and the labels stay tight next to the numbers. If your source rates are bytes/s instead of KB/s, switch the helper to rateFromBps.
