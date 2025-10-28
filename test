@@ -1,97 +1,28 @@
-Totally doable—add a tiny formatter and use it in the IO cell.
+Perfect addition — that’s exactly the kind of context users appreciate during migrations.
+Here’s the updated blog section (you can drop this at the end of your previous post or under “Next Steps / Rollout Plan”).
 
-1) Add these helpers (top of the file, above the component)
+⸻
 
-// Format a rate that is stored in KB/s to KB/s, MB/s, or GB/s
-function rateFromKBps(vKBps = 0) {
-  const a = Math.abs(vKBps);
-  if (a >= 1024 * 1024) return { val: vKBps / (1024 * 1024), unit: "GB/s" };
-  if (a >= 1024)        return { val: vKBps / 1024,           unit: "MB/s" };
-  return { val: vKBps, unit: "KB/s" };
-}
+📊 Continuous Learning & Adaptive Sizing
 
-// If your source is **bytes/s**, use this instead:
-// function rateFromBps(vBps = 0) {
-//   const KBps = vBps / 1024;
-//   return rateFromKBps(KBps);
-// }
+We want to emphasize that these limits, parameters, and tiers are not final — they are living, evolving baselines. As we continue to observe how different workloads behave under Firecracker-based KVMs, we expect to refine them.
 
-function fmt(n, maxFrac = 1) {
-  return Number(n || 0).toLocaleString(undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: maxFrac,
-  });
-}
+The goal is to understand how the platform reacts under real-world loads and how databases perform under constrained resources. Some databases, especially those with high I/O throughput or memory-intensive workloads, will require close collaboration with development teams during migration. These will receive individual attention and fine-tuning.
 
-2) Make your Seg accept custom display strings
+To help teams gain visibility and make informed choices, we have built a Database Metrics Dashboard that automatically classifies each database into a Compute, Storage, and I/O class based on its real usage profile.
 
-Replace your Seg with this version (keeps bars but lets you print any text next to them):
+➡️ The dashboard shows:
+	•	CPU, Memory, and Disk usage trends
+	•	p95 and p99 percentiles for IO throughput
+	•	Suggested Compute / Storage / IO classes
+	•	KVM migration readiness indicators
 
-function Seg({
-  label,
-  leftValue,
-  rightValue,
-  unit = "%",
-  leftName = "",
-  rightName = "",
-  leftText,   // if provided, shown instead of `${leftValue}${unit}`
-  rightText,  // if provided, shown instead of `${rightValue}${unit}`
-}) {
-  const leftMain  = leftText  ?? `${Math.round(leftValue)}${unit}`;
-  const rightMain = rightText ?? `${Math.round(rightValue)}${unit}`;
+We also welcome early adopters who wish to proactively migrate their databases to KVM based on the classification and recommendations visible in the dashboard.
+If your database falls into a smaller or stable tier (Tiny / Small / Medium), you can coordinate with us to move it early in the migration wave.
 
-  return (
-    <Stack gap={6}>
-      <Text size="xs" c="dimmed">{label}</Text>
+Our sizing models and thresholds will continue to evolve as we collect more metrics and performance insights from production workloads. Your feedback and collaboration are invaluable in this phase — every migration helps us learn, optimize, and build a stronger, more predictable platform.
 
-      <Group justify="space-between" align="center">
-        <Group gap={4} wrap="nowrap" align="baseline">
-          <Text fz={12} c="teal" fw={700} lh={1}>{leftMain}</Text>
-          {leftName && <Text span fz={10} c="teal.4" fw={600} lh={1}>{leftName}</Text>}
-        </Group>
-        <Group gap={4} wrap="nowrap" align="baseline">
-          <Text fz={12} c="red" fw={700} lh={1}>{rightMain}</Text>
-          {rightName && <Text span fz={10} c="red.4" fw={600} lh={1}>{rightName}</Text>}
-        </Group>
-      </Group>
+⸻
 
-      <Progress.Root size="xs">
-        <Progress.Section value={leftValue}  color="green" />
-        <Progress.Section value={rightValue} color="red" />
-      </Progress.Root>
-    </Stack>
-  );
-}
-
-3) Use it in the IO column
-
-Where you render the IO cell in your table row, compute the display strings once and pass them:
-
-// Assuming your row has p95 write/read rates in KB/s:
-const wKBps = Number(r.ioWriteKBps ?? r.ioWriteKBs ?? 0); // adapt to your field name
-const rKBps = Number(r.ioReadKBps  ?? r.ioReadKBs  ?? 0);
-
-// Convert to nice units
-const wRate = rateFromKBps(wKBps);
-const rRate = rateFromKBps(rKBps);
-
-// Text to show next to the bars
-const wText = `${fmt(wRate.val)} ${wRate.unit}`;
-const rText = `${fmt(rRate.val)} ${rRate.unit}`;
-
-// Your percent bars (0–100) stay as you already compute them:
-const wPct = Math.max(0, Math.min(100, r.ioWritePct ?? 0));
-const rPct = Math.max(0, Math.min(100, r.ioReadPct  ?? 0));
-
-/* ...inside <Table.Td> for IO... */
-<Seg
-  label="IO p95"
-  leftValue={wPct}
-  rightValue={rPct}
-  leftText={wText}
-  rightText={rText}
-  leftName="Write"
-  rightName="Read"
-/>
-
-That’s it. Now 69350 KB/s becomes 67.8 MB/s, 1 230 263 KB/s becomes 1.17 GB/s, etc., and the labels stay tight next to the numbers. If your source rates are bytes/s instead of KB/s, switch the helper to rateFromBps.
+Would you like me to merge this paragraph seamlessly into your full blog text (with tone, formatting, and section flow preserved)?
+I can generate a finalized version with all the previous sections (intro, phasing plan, sizing tiers, and this new continuous-learning part) in one ready-to-publish markdown or PDF.
