@@ -1,28 +1,75 @@
-Perfect addition — that’s exactly the kind of context users appreciate during migrations.
-Here’s the updated blog section (you can drop this at the end of your previous post or under “Next Steps / Rollout Plan”).
 
-⸻
 
-📊 Continuous Learning & Adaptive Sizing
+## 🚀 KVM Migration Kick-Off – First Wave: C0 / S0 / I0 Class Databases
 
-We want to emphasize that these limits, parameters, and tiers are not final — they are living, evolving baselines. As we continue to observe how different workloads behave under Firecracker-based KVMs, we expect to refine them.
+We’re excited to announce that we’re beginning the **KVM migration rollout** for our **lightweight database classes (C0 / S0 / I0)**.
+These include databases identified as **Tiny Tier** workloads — low-traffic, low-IO, and minimal compute footprint instances.
 
-The goal is to understand how the platform reacts under real-world loads and how databases perform under constrained resources. Some databases, especially those with high I/O throughput or memory-intensive workloads, will require close collaboration with development teams during migration. These will receive individual attention and fine-tuning.
+### 📊 Overview
 
-To help teams gain visibility and make informed choices, we have built a Database Metrics Dashboard that automatically classifies each database into a Compute, Storage, and I/O class based on its real usage profile.
+| Region | Databases | Environment | Notes                     |
+| :----- | :-------- | :---------- | :------------------------ |
+| **UK** | 131       | UAT / PROD  | Scheduled for later phase |
+| **HK** | 30        | UAT / PROD  | **First rollout region**  |
+| **US** | 53        | UAT / PROD  | Planned for next wave     |
 
-➡️ The dashboard shows:
-	•	CPU, Memory, and Disk usage trends
-	•	p95 and p99 percentiles for IO throughput
-	•	Suggested Compute / Storage / IO classes
-	•	KVM migration readiness indicators
+A total of **214 databases** are part of this first-phase migration.
 
-We also welcome early adopters who wish to proactively migrate their databases to KVM based on the classification and recommendations visible in the dashboard.
-If your database falls into a smaller or stable tier (Tiny / Small / Medium), you can coordinate with us to move it early in the migration wave.
+---
 
-Our sizing models and thresholds will continue to evolve as we collect more metrics and performance insights from production workloads. Your feedback and collaboration are invaluable in this phase — every migration helps us learn, optimize, and build a stronger, more predictable platform.
+### 🗓 Rollout Schedule – Hong Kong Region
 
-⸻
+#### **Phase 1: HK – UAT Environment**
 
-Would you like me to merge this paragraph seamlessly into your full blog text (with tone, formatting, and section flow preserved)?
-I can generate a finalized version with all the previous sections (intro, phasing plan, sizing tiers, and this new continuous-learning part) in one ready-to-publish markdown or PDF.
+* 🕙 **Tomorrow, 10:00 AM EDT:**
+  Standby databases (UAT) will be moved to KVM.
+* 🕙 **Friday, 10:00 AM EDT:**
+  Primary databases (UAT) will be moved to KVM.
+
+#### **Phase 2: HK – PROD Environment**
+
+* 🕙 **Monday, 10:00 AM EDT:**
+  Standby databases (PROD) will be moved to KVM.
+* 🕙 **Wednesday, 10:00 AM EDT:**
+  Primary databases (PROD) will be moved to KVM.
+
+---
+
+### ⚠️ Expected Downtime
+
+* During **standby migrations**, no downtime is expected.
+* During **primary migrations**, a **brief downtime (1–3 minutes)** may occur while replication roles switch and the instance transitions to KVM.
+  Application owners will receive a confirmation once the databases are healthy and fully online post-migration.
+
+---
+
+### 💡 Why These Databases First?
+
+C0 / S0 / I0 databases are smaller, lower-throughput instances ideal for the first wave of KVM adoption.
+This controlled rollout helps us:
+
+* Validate automated provisioning and switchover workflows,
+* Observe how smaller databases perform under Firecracker-based virtualization, and
+* Fine-tune resource templates before scaling to higher-class workloads.
+
+---
+
+### 🧭 Visibility & Monitoring
+
+All migrated databases will appear in the **PgMaker Metrics Dashboard**, where you can track:
+
+* Real-time CPU, memory, and IO trends
+* Assigned KVM class (Compute, Storage, IO)
+* Replica status and replication lag
+* Migration status (standby → primary → KVM)
+
+---
+
+### 💬 Need Help or Have Concerns?
+
+If you notice any issues post-migration or believe your database sizing (C/S/I class) needs review, please reach out to the **PgMaker Team**.
+We’ll work closely with each team to ensure performance, stability, and sizing accuracy as we expand the KVM rollout across regions.
+
+---
+
+Would you like me to produce this as a **formatted Markdown post** (for Confluence / internal blog) or a **PDF announcement** with your PgMaker branding header (like the previous one)?
