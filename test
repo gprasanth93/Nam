@@ -1,75 +1,187 @@
+Love it—let’s replace the “Health” column with a KVM migration complexity score (5 tiers, sortable), and compute it on the server so the table just renders a badge.
+
+Below are drop-in changes for both server.js and DbListPage.jsx.
+
+⸻
+
+5 tiers (left→right = easier→harder)
+	1.	Easy – small DB, low IO/conn, low CPU/Mem.
+	2.	Low – modest size/traffic; routine move.
+	3.	Medium – mid-size or moderate IO/conn; plan a window.
+	4.	Hard – large or hot DB (high IO/conn or CPU/Mem); staging + longer window.
+	5.	Extreme – multi-TB and/or very hot; phased move, throttle, extended window.
+
+⸻
+
+A) server.js — compute migr object per DB
+
+Add this helper (near your other bucketing code):
+
+// map "I3" -> 3, "C2" -> 2, etc.
+function classIndex(key = "") {
+  const m = /[A-Z]([0-9]+)/i.exec(String(key));
+  return m ? Number(m[1]) : 0;
+}
+
+// Return { rank: 1..5, label: "Easy|Low|Medium|Hard|Extreme", score, reasons:[] }
+function computeKvmMigrationComplexity(row) {
+  // Inputs expected on your rows; adjust names if different
+  const sizeGiB = Number(row.dbSizeGiB ?? row.dbSize ?? 0);
+  const connP95 = Number(row.connectionsP95 ?? row.pConn ?? 0);
+  const cpuPct  = Number(row.pCpu ?? row.cpuP95 ?? 0);
+  const memPct  = Number(row.pMem ?? row.memP95 ?? 0);
+
+  // IO class from suggest (preferred), otherwise derive from IO rates if you have them
+  const ioClassKey = row.suggest?.io?.key ?? row.suggest?.wal?.key ?? row.suggest?.IO?.key;
+  const ioIdx = Math.min(5, Math.max(0, classIndex(ioClassKey))); // 0..5
+
+  // Size points
+  //   0: <=150GiB, 1: <=500, 2: <=1500, 3: <=3000, 4: >3000
+  const sizePts =
+    sizeGiB <= 150 ? 0 :
+    sizeGiB <= 500 ? 1 :
+    sizeGiB <= 1500 ? 2 :
+    sizeGiB <= 3000 ? 3 : 4;
+
+  // Connections points
+  //   0: <=50, 1: <=150, 2: <=300, 3: <=600, 4: >600
+  const connPts =
+    connP95 <= 50 ? 0 :
+    connP95 <= 150 ? 1 :
+    connP95 <= 300 ? 2 :
+    connP95 <= 600 ? 3 : 4;
+
+  // CPU/Mem points (percent)
+  const cpuPts =
+    cpuPct <= 20 ? 0 :
+    cpuPct <= 40 ? 1 :
+    cpuPct <= 60 ? 2 :
+    cpuPct <= 80 ? 3 : 4;
+
+  const memPts =
+    memPct <= 20 ? 0 :
+    memPct <= 40 ? 1 :
+    memPct <= 60 ? 2 :
+    memPct <= 80 ? 3 : 4;
+
+  // IO points (from class index), cap at 4 for scoring
+  const ioPts = Math.min(4, Math.max(0, ioIdx - 1)); // I0→0 … I5→4
+
+  // Slight penalty if not already in KVM (bare metal usually needs more orchestration)
+  const inKvmPenalty = row.inKvm ? 0 : 1;
+
+  // Weighted score (tune as you like)
+  const score = sizePts * 3 + ioPts * 2 + connPts * 2 + cpuPts + memPts + inKvmPenalty;
+
+  // Map score → rank
+  // 0–3: Easy, 4–6: Low, 7–10: Medium, 11–14: Hard, 15+: Extreme
+  let rank = 1, label = "Easy";
+  if (score >= 15) { rank = 5; label = "Extreme"; }
+  else if (score >= 11) { rank = 4; label = "Hard"; }
+  else if (score >= 7) { rank = 3; label = "Medium"; }
+  else if (score >= 4) { rank = 2; label = "Low"; }
+
+  return { rank, label, score };
+}
+
+Wherever you build each DB document in /api/dbs (and /api/db/:name if you want it on the profile as well), add:
+
+const migr = computeKvmMigrationComplexity(dbRow);
+out.push({
+  // ...existing fields you return
+  migr, // {rank,label,score}
+});
+
+Keep using your pCpu / pMem fields (you told me you renamed them). If your field names differ, change the reads above.
+
+⸻
+
+B) DbListPage.jsx — show/sort by complexity instead of Health
+	1.	Badge renderer
+
+Put this helper near your other small render functions:
+
+import { Badge, Tooltip } from "@mantine/core";
+
+function ComplexityBadge({ migr }) {
+  if (!migr) return <Badge variant="light">—</Badge>;
+
+  const color =
+    migr.rank === 1 ? "green"  :
+    migr.rank === 2 ? "lime"   :
+    migr.rank === 3 ? "yellow" :
+    migr.rank === 4 ? "orange" : "red";
+
+  const desc =
+    migr.label === "Easy"    ? "Small & low-traffic; routine move." :
+    migr.label === "Low"     ? "Modest size/traffic; short window." :
+    migr.label === "Medium"  ? "Mid-size or moderate IO/conn; plan." :
+    migr.label === "Hard"    ? "Large/hot DB; staged move recommended." :
+                               "Multi-TB and/or very hot; phased migration.";
+
+  return (
+    <Tooltip label={`${migr.label} (score ${migr.score}) – ${desc}`} withArrow>
+      <Badge color={color} variant="filled">{migr.label}</Badge>
+    </Tooltip>
+  );
+}
+
+	2.	Replace the column
+
+Find the table header where you had Health and replace:
+
+<Table.Th onClick={() => setSort({ key: "migr", dir: nextDir("migr") })}>
+  Complexity
+  {renderSortIcon("migr")}
+</Table.Th>
+
+…and in the row:
+
+<Table.Td>
+  <ComplexityBadge migr={row.migr} />
+</Table.Td>
+
+	3.	Sorting logic
+
+Ensure your sort switch understands the new key:
+
+const sorted = [...filtered].sort((a, b) => {
+  const dir = sort.dir === "desc" ? -1 : 1;
+  switch (sort.key) {
+    case "migr": {
+      const av = a.migr?.rank ?? 0;
+      const bv = b.migr?.rank ?? 0;
+      return (av - bv) * dir;
+    }
+    // …existing cases (name, cpu, mem, size, etc.)
+    default:
+      return 0;
+  }
+});
+
+If you already centralize getSortValue(row, key), just return row.migr?.rank for "migr".
+
+	4.	Column header label
+
+Change the heading text in your UI from “Health” → “Complexity”.
+
+⸻
+
+C) Optional: show on the profile page
+
+If you want the same badge on the DB profile header:
+
+<Group gap="xs">
+  <Title order={2}>{db.dbName}</Title>
+  <ComplexityBadge migr={db.migr} />
+</Group>
 
 
-## 🚀 KVM Migration Kick-Off – First Wave: C0 / S0 / I0 Class Databases
+⸻
 
-We’re excited to announce that we’re beginning the **KVM migration rollout** for our **lightweight database classes (C0 / S0 / I0)**.
-These include databases identified as **Tiny Tier** workloads — low-traffic, low-IO, and minimal compute footprint instances.
+Why this works
+	•	All the heavy lifting is server-side, so the UI only displays and sorts a small {rank,label,score} blob.
+	•	The formula is transparent and tunable (weights + thresholds); tweak once in server.js, everything updates.
+	•	Rank gives you a stable sort order, label is a friendly name, and the tooltip provides context to users.
 
-### 📊 Overview
-
-| Region | Databases | Environment | Notes                     |
-| :----- | :-------- | :---------- | :------------------------ |
-| **UK** | 131       | UAT / PROD  | Scheduled for later phase |
-| **HK** | 30        | UAT / PROD  | **First rollout region**  |
-| **US** | 53        | UAT / PROD  | Planned for next wave     |
-
-A total of **214 databases** are part of this first-phase migration.
-
----
-
-### 🗓 Rollout Schedule – Hong Kong Region
-
-#### **Phase 1: HK – UAT Environment**
-
-* 🕙 **Tomorrow, 10:00 AM EDT:**
-  Standby databases (UAT) will be moved to KVM.
-* 🕙 **Friday, 10:00 AM EDT:**
-  Primary databases (UAT) will be moved to KVM.
-
-#### **Phase 2: HK – PROD Environment**
-
-* 🕙 **Monday, 10:00 AM EDT:**
-  Standby databases (PROD) will be moved to KVM.
-* 🕙 **Wednesday, 10:00 AM EDT:**
-  Primary databases (PROD) will be moved to KVM.
-
----
-
-### ⚠️ Expected Downtime
-
-* During **standby migrations**, no downtime is expected.
-* During **primary migrations**, a **brief downtime (1–3 minutes)** may occur while replication roles switch and the instance transitions to KVM.
-  Application owners will receive a confirmation once the databases are healthy and fully online post-migration.
-
----
-
-### 💡 Why These Databases First?
-
-C0 / S0 / I0 databases are smaller, lower-throughput instances ideal for the first wave of KVM adoption.
-This controlled rollout helps us:
-
-* Validate automated provisioning and switchover workflows,
-* Observe how smaller databases perform under Firecracker-based virtualization, and
-* Fine-tune resource templates before scaling to higher-class workloads.
-
----
-
-### 🧭 Visibility & Monitoring
-
-All migrated databases will appear in the **PgMaker Metrics Dashboard**, where you can track:
-
-* Real-time CPU, memory, and IO trends
-* Assigned KVM class (Compute, Storage, IO)
-* Replica status and replication lag
-* Migration status (standby → primary → KVM)
-
----
-
-### 💬 Need Help or Have Concerns?
-
-If you notice any issues post-migration or believe your database sizing (C/S/I class) needs review, please reach out to the **PgMaker Team**.
-We’ll work closely with each team to ensure performance, stability, and sizing accuracy as we expand the KVM rollout across regions.
-
----
-
-Would you like me to produce this as a **formatted Markdown post** (for Confluence / internal blog) or a **PDF announcement** with your PgMaker branding header (like the previous one)?
+If you paste your DB object shape (the exact field names you return from /api/dbs), I can trim the helper to match it 1:1.
