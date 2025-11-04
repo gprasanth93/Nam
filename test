@@ -1,9 +1,201 @@
-Dear DB Owners,
+---
 
-As part of our ongoing effort to make the platform more reliable and achieve better control over resource allocation across hosts, we have started migrating databases to the KVM environment.
+## Executive Summary
 
-As a head start, we are automatically migrating smaller and low-resource databases to KVM. However, as we move forward, we also need to carefully assess the larger and more resource-intensive databases, as they have a significant impact on overall platform capacity.
+2025 was a year of platform hardening and migration enablement for PgMaker. I led the framing and kickoff of our KVM migration program (C0/S0/I0 classes), advanced replication architecture to a simpler and more scalable model (single exposed port on the bare‑metal host routing to the active primary KVM), rolled out TimescaleDB‑backed metrics and a practical “migration complexity” score, and resolved reliability issues (notably an express‑rate‑limit store bug that surfaced as `totalHits` undefined). These delivered safer migrations, clearer decisioning, and fewer production foot‑guns for our internal customers.
 
-Below are 42 databases that require closer review before migration. These databases deviate from the KVM classes currently defined and will need a database developer’s input to assess how they can be optimized and migrated — ensuring they fit within no more than C5/S5/I4 resource thresholds.
+---
 
-Your cooperation and analysis will help us make this migration smooth and sustainable for all environments.
+## Key Outcomes & Impact (Top 10)
+
+1. **KVM Migration Program (C0/S0/I0) — defined & launched.**
+
+   * Drove the classification model and migration approach for 214 databases across regions (UK 131, HK 30, US 53).
+   * Authored comms, runbooks, and a **standby‑first** migration plan to minimize downtime and risk.
+   * **Impact:** Shared language and sequencing for stakeholders; faster, safer execution windows.
+
+2. **First migration waves planned and coordinated (HK focus).**
+
+   * Structured UAT → PRD cadence with clearly communicated 10:00 EDT windows and standby‑then‑primary cutovers.
+   * **Impact:** Predictable change windows; reduced operational stress during cutovers.
+
+3. **Replication architecture simplified for scale.**
+
+   * Standardized on **single exposed port** on bare‑metal host to route standby replication traffic to the active primary KVM; aligned on doing essential installs on the host for a clean, maintainable solution.
+   * **Impact:** Less toil for failovers/switchover; clearer networking; easier audits.
+
+4. **TimescaleDB metrics in place for PgMaker.**
+
+   * Operationalized a TimescaleDB setup for time‑series DB metrics to support capacity planning and SLO tracking.
+   * **Impact:** Queryable history for throughput/lag; more objective go/no‑go calls for migrations.
+
+5. **Migration “Complexity Score” dashboard.**
+
+   * Built a dashboard to classify DBs by complexity to migrate; renamed user‑facing “Health” to **Complexity** for clarity (five levels from *Easy* → *Extremely Complex*).
+   * **Impact:** Transparent, data‑driven prioritization and expectation management.
+
+6. **Stability fix: express‑rate‑limit regression.**
+
+   * Diagnosed a production instability caused by a custom memory store (undefined `totalHits`); restored reliability by reverting to the default memory store (v7.4.1).
+   * **Impact:** Eliminated noisy errors and blocked requests; improved platform trust.
+
+7. **Frontend simplification for faster delivery.**
+
+   * Merged `frontend/src/` into project root `src/` to simplify build/deploy and cut path confusion.
+   * **Impact:** Cleaner CI, fewer build surprises, easier onboarding.
+
+8. **Reverse‑proxy/vite troubleshooting and hardening.**
+
+   * Investigated gateway timeouts and clarified relative pathing and env‑specific reverse proxy setup to align local and env behaviours.
+   * **Impact:** Better dev→UAT parity; fewer “works on my machine” failures.
+
+9. **Runbook & blog content to scale migrations.**
+
+   * Authored internal posts on KVM classes, downtime expectations, and sequencing; improved change comms quality.
+   * **Impact:** Reduced ticket noise; stakeholders felt prepared for change windows.
+
+10. **Operational guardrails & controls uplift.**
+
+    * Reinforced WAL/replication practices, logging conventions, and rate‑limit protections; continued to standardize configs.
+    * **Impact:** Lower risk posture; faster incident triage.
+
+---
+
+## Objectives & Key Results (OKR‑style)
+
+| Objective                                   | Key Results                                                                                              | Status        |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------- | ------------- |
+| **O1: Launch KVM migration program**        | Define C0/S0/I0 classes; publish migration playbook; schedule first HK waves (UAT→PRD, standby→primary). | **On track**  |
+| **O2: Improve reliability of PgMaker edge** | Diagnose and remove rate‑limit regression; reduce related error logs to near‑zero.                       | **Completed** |
+| **O3: Make migrations data‑driven**         | Stand up TimescaleDB metrics; ship “Complexity” scoring dashboard (5 levels).                            | **Completed** |
+| **O4: Simplify replication topology**       | Adopt single‑port routing on bare‑metal host; document failover steps; socialize pattern.                | **On track**  |
+| **O5: Reduce build/deploy friction**        | Flatten frontend structure; document reverse proxy patterns for env parity.                              | **Completed** |
+
+> **Note:** I’ve intentionally avoided inserting unverifiable numeric KPIs here; happy to add precise counts (e.g., migrations completed, error reductions, p95 latencies) from logs upon request.
+
+---
+
+## Leadership & Collaboration
+
+* Partnered with infra/networking to align on host‑level installs and port routing strategy.
+* Coordinated across regions (HK, UK, US) to align migration sequencing and downtime comms.
+* Drove crisp change documentation and set expectations ahead of windows to reduce escalations.
+
+---
+
+## Innovation & Continuous Improvement
+
+* Advanced **Complexity‑based** migration triage to focus effort where it matters most.
+* Explored ideas for a distributed artifact service ("DAWN") and continued to evaluate Rust vs Node trade‑offs for high‑throughput brokers (ongoing discovery).
+* Codified common proxy and build pitfalls into checklists to cut repeat issues.
+
+---
+
+## Customer Impact
+
+* Fewer failed requests from rate‑limit store issues; clearer migration comms lowered user anxiety.
+* Better visibility into readiness via metrics and the complexity dashboard; customers know what to expect.
+
+---
+
+## Learning & Growth
+
+* Deepened expertise in PostgreSQL replication patterns (primary/async standbys, failover playbooks).
+* Hands‑on with TimescaleDB hypertables for observability; improved Node.js 22 practices.
+* Strengthened change management and stakeholder comms through multiple migration dry‑runs.
+
+---
+
+## What Didn’t Go Perfectly & How I Addressed It
+
+* **Custom rate‑limit store** introduced instability → rolled back quickly; captured lessons learned and added a guardrail to avoid similar regressions.
+* **Proxy pathing and timeouts** surfaced late in UAT → tightened documentation and added env‑parity checks to our deployment checklist.
+
+---
+
+## 2026 Goals (Draft)
+
+1. **Complete multi‑region KVM migrations** with zero‑surprise change windows and clear blast‑radius controls.
+2. **Automated switchover/failover** with health‑gated routing and minimal human intervention.
+3. **SLOs & Error Budgets** for PgMaker surfaces; integrate with alerting and on‑call.
+4. **Blue/Green DB upgrades** for extension and major‑version changes with predictable downtime.
+5. **Cost/performance telemetry** for right‑sizing and cloud/host capacity planning.
+6. **Chaos & DR drills**: regular failover exercises; evidence packs for audits.
+
+---
+
+## Support Needed
+
+* **Resourcing:** Dedicated cycles for migration tooling (automation + dashboards) to accelerate remaining regions.
+* **Environments:** Stable UAT capacity to run realistic load during cutovers.
+* **Cross‑team alignment:** Early coordination with security/networking for host‑level patterns (ports, firewall rules, observability agents).
+
+---
+
+## Appendix — Artifact Pointers (internal)
+
+* KVM migration playbook & class definitions
+* Complexity dashboard link
+* TimescaleDB metrics schema & retention
+* Reverse proxy/Env parity checklist
+* Rate‑limit store post‑mortem notes
+
+---
+
+## SuccessFactors Self‑Assessment Entries (paste‑ready)
+
+1. **PgMaker Master Lab (hands‑on).**
+   Ran a live, code‑along Master Lab (~30 attendees) covering PgMaker internals and day‑to‑day workflows. Participants left able to self‑serve common tasks using the sample repo and recordings.
+   **Reference:** Master Lab deck & recording (internal link).
+
+2. **XLT sharing session (pg_notify rotation).**
+   Showcased new PgMaker features, including pg_notify–based password rotation that removes HTTP polling loops. Improved reliability and cut rotation latency while simplifying ops.
+   **Reference:** XLT slides & demo repo (internal link).
+
+3. **Pune‑wide MSS IT Open Mic.**
+   Hosted an open forum (~150 attendees) to demo PgMaker, answer deep‑dive questions, and collect onboarding needs. Drove multiple follow‑ups that converted into active onboardings.
+   **Reference:** Event page & FAQ doc (internal link).
+
+4. **Partnered onboarding for new teams (FICC, SmartServe, others).**
+   Captured requirements, provided integration templates/runbooks, and guided teams from dev to prod. Reduced time‑to‑first‑database and increased platform adoption.
+   **Reference:** Onboarding runbooks & intake tickets (internal links).
+
+5. **KVM database architecture—design to rollout.**
+   Designed, coded, tested, and launched DBs on KVM with SSH access, reverse proxy, WebSocket sidecar, and fast rebuild tooling; documented and socialized the pattern.
+   **Reference:** KVM architecture & tooling docs (internal links).
+
+6. **First developer wave on KVM (zero failures).**
+   Executed the initial dev migrations with clean change windows and no rollback. Enabled per‑DB custom KVM sizing to right‑fit cost/performance from day one.
+   **Reference:** Change records & rollout summary (internal links).
+
+7. **SRE partnership—rebuilds & resource management.**
+   Actively supported SRE with database rebuilds, triaged high IO/RAM cases, and tuned quotas/limits to stabilize shared hosts. Improved capacity hygiene and reduced noisy incidents.
+   **Reference:** SRE playbook & ops tickets (internal links).
+
+8. **KVM stress tests + first production migrations.**
+   Validated KVM under heavy workloads and executed first prod moves for high IO/RAM databases without incident; new architecture allowed safe tuning of KVM and PostgreSQL configs.
+   **Reference:** Perf test report & prod change tickets (internal links).
+
+9. **TimescaleDB observability backbone.**
+   Built a metrics pipeline ingesting >3M rows/day (hypertables + retention) to unlock historical analysis, capacity planning, and objective go/no‑go decisions.
+   **Reference:** Metrics schema, retention policy, ingestion jobs (internal links).
+
+10. **Grafana visibility for KVM & Postgres.**
+    Delivered node‑ and DB‑level dashboards (CPU, memory, IO, disk, connections, lag) that surface hotspots quickly and improved MTTD/MTTR.
+    **Reference:** Grafana folder & dashboard index (internal links).
+
+11. **MasterLab Toronto—3‑day instructor.**
+    Led an in‑person bootcamp on MuServer, Cranker, and PgMaker with structured labs; accelerated ramp‑up and produced a reusable curriculum.
+    **Reference:** Bootcamp syllabus & lab repos (internal links).
+
+12. **KVM Classes (cloud‑style bucketing).**
+    Introduced standardized C/S/I class buckets to express resource profiles and migration complexity, giving stakeholders a common language for sizing and risk.
+    **Reference:** Class definitions & decision guide (internal links).
+
+13. **Database‑Profile site (load→class recommendations).**
+    Built a web app that visualizes IO/MEM/CPU/connection patterns and recommends the best‑fit KVM class, enabling self‑serve pre‑migration sizing.
+    **Reference:** Database‑Profile URL & service README (internal links).
+
+14. **Bulk auto‑migration analysis & stakeholder alignment (separate from #13).**
+    Designed the approach for automated, at‑scale migrations to KVM (guardrails, sequencing, rollback plans). Ran comms to schedule large DB moves and fit workloads cleanly within KVM constraints.
+    **Reference:** Migration plan, sequencer design, comms packs (internal links).
