@@ -1,205 +1,153 @@
-# Proactive Capacity Management in DHP: From “What’s Hot?” to “What Happens If We Move It?”
+# HostDetails 2.0: Snapshot-driven incident response + adaptive refresh
 
-Capacity management in DHP has historically been reactive. We typically learn about risk only when a host is already overloaded, when production symptoms appear, or when a service starts trending into instability (high CPU + memory pressure, IO bottlenecks, or runaway tasks). By then, our choices are limited and expensive: emergency rebalancing, delayed releases, and operational churn.
+When a production host starts tipping into overload, the hardest part isn’t *knowing* it’s unhealthy — it’s answering the next question fast:
 
-This Host Profile project (now enhanced with **Load Projection**) moves us from reactive firefighting to **proactive planning**—helping teams answer both:
+**“What exactly is causing this right now, and what can we safely stop to recover the box?”**
 
-1. **What is risky right now?**
-2. **What will become risky after a change?**
-
----
-
-## The Problem We’re Solving
-
-DHP continues to grow due to:
-
-* increasing hosting/service demand
-* regulatory and role swap plans that change placement constraints
-* general expansion of workloads and tenants
-
-The pain point is not just visibility—it's prediction. We can see a host’s current load in various places, but we lack a quick way to simulate impact when we:
-
-* drain a host for maintenance
-* redistribute workloads across a region
-* execute role swaps between data centers
-* plan onboarding or growth waves
-* justify new hardware requirements with evidence
+The new **HostDetails** experience is built for that exact moment. It combines a clean, at-a-glance resource view with **time-keyed TOP snapshots**, so responders can jump straight to the processes that were dominating CPU, memory, or I/O *at the incident timing* — not “whatever is running when you finally click refresh.”
 
 ---
 
-## What the Host Profile Dashboard Gives Us
+## The pain point we’re solving
 
-### 1) A Single, Operationally Useful View of Host Health
+Traditional host dashboards often fail in the most critical window:
 
-The Host List view is designed for *fast triage and prioritization*.
+* You spot a spike, but by the time you inspect the host, the top process list has changed.
+* You get one “current” view with no timeline, so you can’t correlate to the exact incident minute.
+* Refresh is either too slow (misses the event) or too aggressive (wastes cycles on already-stressed hosts).
 
-**What it shows clearly (as in your screenshot):**
-
-* Host identity + **DC + Region**
-* **LoadScore** (stress score 0–100)
-* **SharedLoad** (relative contribution in the fleet/selection 0–100)
-* CPU / Memory / IO bars (quick hotspot scanning)
-* Tasks count (useful early signal for contention / runaway behavior)
-
-This matters because capacity failures rarely show up as a single metric. The table makes patterns visible immediately:
-
-* clusters of overloaded hosts in the same DC/Region
-* IO-constrained outliers
-* high tasks hosts even when CPU looks moderate
-* the “top contributors” in SharedLoad (the hosts you should care about first)
-
-**Figure 1 – Host List View**
-*At-a-glance risk scoring (LoadScore / SharedLoad) + resource indicators + tasks count to prioritize action fast.*
+In real incidents, **minutes matter**, and **context matters even more**.
 
 ---
 
-## Load Projection: The Key Enhancement
+## What’s new in HostDetails
 
-The biggest leap is **Load Projection**—turning the dashboard from “observability” into “decision support”.
+### 1) TOP snapshots that preserve “what was happening”
 
-### 2) Region-Based Filtering + Left Panel Host Selection
+HostDetails now supports **multiple TOP snapshots** per host. Each snapshot is time-stamped and selectable, letting you:
 
-In Load Projection:
+* View top processes for **a specific moment**
+* Compare “before vs during vs after” overload
+* Avoid the “I refreshed and lost the smoking gun” problem
 
-* user filters by **Region**
-* all hosts in that region are listed on the left panel
-* initially **all hosts are selected** (baseline = current)
-* user can deselect:
+This is especially useful for:
 
-  * individual hosts
-  * entire DC groups (“Select all / Deselect all” per DC)
-* projection updates dynamically
+* Sudden CPU storms (runaway query / batch / cron)
+* Memory pressure causing swapping and cascading latency
+* I/O saturation (log storms, vacuum bursts, runaway backups)
 
-This is exactly what teams need for real workflows:
-
-* planning maintenance windows
-* evaluating “drain these hosts” vs “keep these hosts”
-* simulating growth waves or placement changes
-
-### 3) Projected Impact: Quantified Before → After
-
-The projected table shows, for each host, how key metrics change due to redistribution:
-
-* LoadScore
-* SharedLoad
-* CPU%
-* MEM%
-* IO%
-* Tasks
-
-The value here is not just “a number”—it’s the change:
-
-* **before → after ranges**
-* which hosts become new hotspots
-* which hosts remain safe
-* how close we get to the edge *before* we execute a change
-
-The header summary is also powerful (visible in your screenshot):
-**“Projection: redistributing X CPU cores, Y GiB RAM capacity, and Z tasks…”**
-That’s exactly the kind of language we need for operational decision-making and leadership communication.
-
-**Figure 2 – Load Projection View**
-*Region/DC selection on the left; projected impact table on the right; dynamic redistribution summary at the top.*
+**Bottom line:** snapshots turn a transient overload into an **inspectable event**.
 
 ---
 
-## Why This Matters for DHP (Real Advantages)
+### 2) Incident-first workflow: identify → filter → act
 
-### A) Fewer Production Incidents from Overload
+HostDetails is optimized for the responder loop:
 
-Most production capacity incidents are avoidable if we can see:
+1. **Pick the incident timestamp snapshot**
+2. Go straight to **Top Processes**
+3. Use filters to isolate likely culprits:
 
-* which hosts are already near threshold
-* how planned changes will shift load
-* which targets will become bottlenecks after redistribution
+   * **Filter by command** (quickly narrow by service/binary/job name)
+   * **Filter/sort by CPU%**
+   * **Filter/sort by MEM%**
+4. Decide the safest mitigation:
 
-Load Projection gives a “pre-flight check” for changes that affect placement and load.
+   * Stop the runaway worker/job
+   * Restart a bad actor service
+   * Kill orphaned heavy processes
+   * Escalate with concrete evidence (command + PID + resource usage)
 
-### B) Faster, Safer Role Swap and Regulatory Change Execution
-
-Regulatory/role swap plans often force movement across DCs or regions. Those changes can accidentally concentrate load.
-
-With projection:
-
-* we can simulate impact *before* executing
-* we can stage changes (wave-based redistribution)
-* we can identify where we need headroom *before* the swap
-
-This makes compliance-driven change operationally safer.
-
-### C) Data-Backed Hardware Procurement
-
-Procurement conversations usually fail when they’re anecdotal. This tool provides:
-
-* baseline load distribution by region/DC
-* projected increases due to growth or role swaps
-* quantified headroom and risk thresholds
-
-Instead of “we feel we need new hardware”, we can show:
-
-* “this region hits overload after redistribution”
-* “these hosts become hotspot-bound”
-* “this is the capacity delta required”
-
-### D) Better Operational Prioritization and Reduced Churn
-
-SharedLoad highlights “who contributes most” in the current set. That means:
-
-* the first hosts to optimize or rebalance are obvious
-* teams stop chasing noise and focus on load drivers
-* SRE and platform can align faster on action plans
+This reduces guesswork and makes post-incident review far more objective.
 
 ---
 
-## How Teams Use This in Practice
+## Adaptive refresh: fast when it matters, quiet when it doesn’t
 
-### Scenario 1: Maintenance / Drain Planning
+Instead of refreshing on a fixed interval, HostDetails now supports **dynamic refresh based on current resource stress**. The refresh rate is driven by the **maximum** of CPU%, MEM%, or IO% (i.e., whichever is worst).
 
-1. Select region
-2. Deselect hosts planned for maintenance
-3. Observe which remaining hosts become hotspots
-   → adjust maintenance scope or add temporary capacity
+### Refresh policy (based on max(CPU, MEM, IO))
 
-### Scenario 2: Role Swap / Placement Plan Validation
+| Max usage band | Refresh interval     |
+| -------------- | -------------------- |
+| **< 50%**      | Every **4 hours**    |
+| **50% – 60%**  | Every **2 hours**    |
+| **60% – 70%**  | Every **1 hour**     |
+| **70% – 80%**  | Every **30 minutes** |
+| **> 80%**      | Every **5 minutes**  |
 
-1. Select region and DC group
-2. Model the post-swap selection set
-3. Verify projected LoadScore/CPU/MEM/IO remain safe
-   → refine sequencing or request capacity earlier
+Why this matters:
 
-### Scenario 3: Growth Wave Forecasting
-
-1. Select region
-2. Simulate the expected host set after onboarding changes
-3. Compare projected SharedLoad distribution
-   → identify if fleet becomes imbalanced and where to scale
+* Healthy hosts aren’t constantly polled (less noise, less cost)
+* Hot hosts get rapid updates automatically (faster detection + response)
+* During sustained overload (>80%), the system “locks in” visibility by collecting **frequent snapshots**
 
 ---
 
-## The Bottom Line
+## Snapshots as an incident timeline (example)
 
-This project addresses a major DHP pain point: **we currently lack enhanced capacity management and often end up discovering overload in production**. The Host Profile dashboard provides fast visibility, and Load Projection adds what we’ve been missing: **impact simulation**.
+Imagine an outage window:
 
-It helps DHP become:
+* **10:05** CPU jumps from 35% → 92%
+* **10:07** latency alarms fire, traffic starts backing up
+* **10:10** responder opens HostDetails
 
-* more reliable (fewer overload incidents)
-* more predictable (safer change execution)
-* more efficient (better utilization, better decisions)
-* more prepared (data-backed hardware provisioning aligned to growth + regulatory plans)
+Without snapshots, you might only see the *current* top processes (which may have changed).
+With snapshots, you can select:
 
----
+* **10:05 snapshot** → identifies the first heavy command that triggered the spike
+* **10:10 snapshot** → confirms whether the same command is still the dominant consumer
+* **10:15 snapshot** → validates recovery after mitigation
 
-## Optional “Next Enhancements” (If You Want a Roadmap Section)
-
-* save/load projection scenarios (“Role Swap Plan A”, “Q2 Growth”)
-* export a projection report for change tickets
-* threshold alerts (projected hotspot > 80% = warning)
-* integrate timeseries trends (predict drift, not just snapshot)
-* show bottleneck driver (CPU/MEM/IO) for hotspot clarity
+This makes your actions defensible and repeatable: **“We stopped X because snapshot at 10:05 shows it consuming 78% CPU and 22 GB RSS.”**
 
 ---
 
-If you want, I can rewrite this in two other formats:
+## Better process exploration with filters
 
-1. **One-page executive summary** (more concise, procurement-friendly)
-2. **Internal announcement post** (short, punchy, includes “how to access” + “how to use”)
+### Filter by command
+
+This is the fastest way to answer:
+
+* “Is this the app service, a batch job, a backup, a rogue script, or a DB task?”
+* “Is one specific binary name repeating across the top list?”
+
+### Filter by CPU and memory usage
+
+These filters help you zoom in on:
+
+* High CPU, low memory → tight loops, hot queries, busy polling
+* High memory, moderate CPU → leaks, cache blowups, runaway JVM/node processes
+* High I/O offenders (paired with IO metrics) → logging bursts, backups, vacuum churn
+
+**Combined with snapshots**, these filters become a practical incident “search engine.”
+
+---
+
+## Why this is a big win for production operations
+
+* **Faster MTTR:** responders spend less time hunting and more time fixing
+* **Stronger evidence:** “snapshot at incident time” beats screenshots of a moving target
+* **Lower overhead:** refresh rate scales with need (quiet when stable, fast when hot)
+* **Better collaboration:** on-call can share a snapshot timestamp and everyone sees the same truth
+* **Improved postmortems:** you can reconstruct what dominated the host during the incident window
+
+---
+
+## What’s next (easy extensions)
+
+If we want to push this further, the natural next steps are:
+
+* Auto-highlight “top offenders” (e.g., top 3 by CPU/MEM deltas vs baseline)
+* Compare snapshots side-by-side (diff view)
+* Add saved filters (“show only postgres”, “show only java”, “show only backup jobs”)
+* Tie snapshot timestamps to alert timelines (click alert → open HostDetails at that snapshot)
+
+---
+
+## Closing
+
+The upgraded HostDetails makes overload response **time-aware**, **actionable**, and **efficient**.
+Snapshots ensure we don’t lose the truth of the incident moment, and adaptive refresh ensures we capture more detail automatically as stress rises — without wasting cycles when hosts are healthy.
+
+If you want, paste your current HostDetails UI screenshot and I’ll tailor this blog with the exact component names/sections (and a “how to use it during an incident” walkthrough that matches your layout).
