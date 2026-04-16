@@ -1,153 +1,1028 @@
-# HostDetails 2.0: Snapshot-driven incident response + adaptive refresh
+Here is the clean pattern I would use in your Firecracker VMs:
 
-When a production host starts tipping into overload, the hardest part isn’t *knowing* it’s unhealthy — it’s answering the next question fast:
+Use **one long-running generic systemd service for the PostgreSQL server itself**, and **one generic oneshot operation unit** for admin actions such as `initdb`, `basebackup`, `rewind`, `checkpoint`, and `promote`. Keep the server lifecycle in the main unit, and keep operational jobs separate so they get their own logs, timeouts, and cgroup boundaries. Also, use `postgres` itself as the main process under systemd, and use `pg_ctl` only for stop/reload-style control actions. `ExecStop=` is the right place for clean shutdown logic, and systemd runs `ExecStop=` on both stop and restart. `MemoryLow`/`MemoryMin` are protection settings, `MemoryHigh` is the main throttling control, and `MemoryMax` is the last line of defense; these memory controls require the unified cgroup hierarchy. ([man7.org][1])
 
-**“What exactly is causing this right now, and what can we safely stop to recover the box?”**
+## 1) Runtime files
 
-The new **HostDetails** experience is built for that exact moment. It combines a clean, at-a-glance resource view with **time-keyed TOP snapshots**, so responders can jump straight to the processes that were dominating CPU, memory, or I/O *at the incident timing* — not “whatever is running when you finally click refresh.”
+Have `vm-control` write three runtime files.
+
+`/run/pgvm/cluster.env`
+
+```bash
+PGMAJOR=16
+PG_BIN_DIR=/usr/pgsql-16/bin
+PGDATA=/data/local/mydb/16/data
+PGPORT=5432
+PGCLUSTER_NAME=mydb
+PGOPTS=
+```
+
+`/run/pgvm/stop.env`
+
+```bash
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=90
+```
+
+`/run/pgvm/op.env`
+
+```bash
+# written per operation; examples shown later
+```
+
+`cluster.env` is the authoritative runtime state for the currently mounted cluster. `stop.env` is only for dynamic stop behavior. `op.env` is for one-off admin jobs.
+
+## 2) Main PostgreSQL systemd service
+
+Create `/etc/systemd/system/pgvm-postgres.service`:
+
+```ini
+[Unit]
+Description=Generic PostgreSQL Server
+After=local-fs.target network.target
+Wants=local-fs.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+
+ExecStart=/usr/local/bin/pgvm-postgres-launch
+ExecStop=/usr/local/bin/pgvm-postgres-stop
+ExecReload=/usr/local/bin/pgvm-postgres-reload
+ExecStopPost=/usr/local/bin/pgvm-postgres-stop-post
+
+Restart=on-failure
+RestartSec=5
+
+TimeoutStopSec=600
+
+OOMScoreAdjust=300
+MemoryHigh=75%
+MemoryMax=85%
+CPUWeight=100
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+This keeps PostgreSQL in its own service/cgroup, gives it bounded resource behavior, and makes stop/restart/reload go through your own wrappers. Since `ExecStop=` is part of restart handling too, your dynamic stop wrapper is honored during restart as well. Keep `TimeoutStopSec` larger than the maximum `pg_ctl -t` value you plan to allow. ([man7.org][1])
+
+## 3) Operation unit for non-daemon tasks
+
+Create `/etc/systemd/system/pgvm-postgres-op@.service`:
+
+```ini
+[Unit]
+Description=PostgreSQL operation %i
+After=local-fs.target network.target
+Wants=local-fs.target
+
+[Service]
+Type=oneshot
+User=appuser
+Group=appuser
+ExecStart=/usr/local/bin/pgvm-postgres-op %i
+TimeoutStartSec=infinity
+StandardOutput=journal
+StandardError=journal
+```
+
+Then `vm-control` can run:
+
+```bash
+systemctl start pgvm-postgres-op@init.service
+systemctl start pgvm-postgres-op@basebackup.service
+systemctl start pgvm-postgres-op@rewind.service
+systemctl start pgvm-postgres-op@checkpoint.service
+systemctl start pgvm-postgres-op@promote.service
+```
+
+That keeps heavy or disruptive jobs out of the main Postgres daemon unit.
+
+## 4) Main wrapper scripts
+
+### `/usr/local/bin/pgvm-postgres-launch`
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+source /run/pgvm/cluster.env
+
+: "${PGDATA:?PGDATA is required}"
+
+if [[ -z "${PG_BIN_DIR:-}" ]]; then
+  : "${PGMAJOR:?PGMAJOR is required when PG_BIN_DIR is not set}"
+  PG_BIN_DIR="/usr/pgsql-${PGMAJOR}/bin"
+fi
+
+exec "${PG_BIN_DIR}/postgres" \
+  -D "${PGDATA}" \
+  -p "${PGPORT:-5432}" \
+  -c "cluster_name=${PGCLUSTER_NAME:-pgvm}" \
+  ${PGOPTS:-}
+```
+
+### `/usr/local/bin/pgvm-postgres-stop`
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+source /run/pgvm/cluster.env
+
+if [[ -z "${PG_BIN_DIR:-}" ]]; then
+  : "${PGMAJOR:?PGMAJOR is required when PG_BIN_DIR is not set}"
+  PG_BIN_DIR="/usr/pgsql-${PGMAJOR}/bin"
+fi
+
+MODE="fast"
+TIMEOUT="90"
+
+if [[ -f /run/pgvm/stop.env ]]; then
+  # shellcheck disable=SC1091
+  source /run/pgvm/stop.env
+  MODE="${PG_STOP_MODE:-fast}"
+  TIMEOUT="${PG_STOP_TIMEOUT:-90}"
+fi
+
+case "$MODE" in
+  smart|fast|immediate) ;;
+  *)
+    echo "invalid PG_STOP_MODE: $MODE" >&2
+    exit 1
+    ;;
+esac
+
+case "$TIMEOUT" in
+  ''|*[!0-9]*)
+    echo "invalid PG_STOP_TIMEOUT: $TIMEOUT" >&2
+    exit 1
+    ;;
+esac
+
+exec "${PG_BIN_DIR}/pg_ctl" \
+  -D "${PGDATA}" \
+  stop \
+  -m "${MODE}" \
+  -w \
+  -t "${TIMEOUT}"
+```
+
+### `/usr/local/bin/pgvm-postgres-reload`
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+source /run/pgvm/cluster.env
+
+if [[ -z "${PG_BIN_DIR:-}" ]]; then
+  : "${PGMAJOR:?PGMAJOR is required when PG_BIN_DIR is not set}"
+  PG_BIN_DIR="/usr/pgsql-${PGMAJOR}/bin"
+fi
+
+exec "${PG_BIN_DIR}/pg_ctl" -D "${PGDATA}" reload
+```
+
+### `/usr/local/bin/pgvm-postgres-stop-post`
+
+```bash
+#!/bin/bash
+set -euo pipefail
+rm -f /run/pgvm/stop.env
+```
+
+PostgreSQL supports three shutdown modes for `pg_ctl stop -m`: `smart`, `fast`, and `immediate`. `fast` is the `pg_ctl` default and is usually the right default for service stop; `smart` waits for clients to leave; `immediate` aborts without clean shutdown and forces crash recovery at the next start. PostgreSQL also documents that direct signals map to these modes: `SIGTERM` is smart, `SIGINT` is fast, and `SIGQUIT` is immediate. ([postgresql.org][2])
+
+## 5) Clean start/stop/restart/reload flows
+
+Start, once `cluster.env` exists:
+
+```bash
+systemctl start pgvm-postgres.service
+```
+
+Stop with defaults:
+
+```bash
+systemctl stop pgvm-postgres.service
+```
+
+Stop with a custom mode and timeout:
+
+```bash
+cat > /run/pgvm/stop.env <<'EOF'
+PG_STOP_MODE=smart
+PG_STOP_TIMEOUT=300
+EOF
+
+systemctl stop pgvm-postgres.service
+```
+
+Restart:
+
+```bash
+systemctl restart pgvm-postgres.service
+```
+
+Reload config:
+
+```bash
+systemctl reload pgvm-postgres.service
+```
+
+`pg_ctl reload` causes the server to reread configuration files such as `postgresql.conf` and `pg_hba.conf`. ([postgresql.org][2])
+
+## 6) Generic operations wrapper
+
+Create `/usr/local/bin/pgvm-postgres-op`:
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+OP="${1:?operation required}"
+
+resolve_bin_dir() {
+  local major="$1"
+  local bindir="${2:-}"
+  if [[ -n "$bindir" ]]; then
+    echo "$bindir"
+  else
+    echo "/usr/pgsql-${major}/bin"
+  fi
+}
+
+case "$OP" in
+  init)
+    source /run/pgvm/op.env
+
+    : "${PG_INIT_PGDATA:?required}"
+    : "${PG_INIT_PGMAJOR:?required unless PG_INIT_BIN_DIR is set}"
+
+    BIN_DIR="$(resolve_bin_dir "${PG_INIT_PGMAJOR}" "${PG_INIT_BIN_DIR:-}")"
+
+    args=( -D "${PG_INIT_PGDATA}" )
+
+    [[ -n "${PG_INIT_USERNAME:-}" ]] && args+=( --username="${PG_INIT_USERNAME}" )
+    [[ -n "${PG_INIT_PWFILE:-}" ]] && args+=( --pwfile="${PG_INIT_PWFILE}" )
+    [[ -n "${PG_INIT_AUTH:-}" ]] && args+=( --auth="${PG_INIT_AUTH}" )
+    [[ -n "${PG_INIT_AUTH_HOST:-}" ]] && args+=( --auth-host="${PG_INIT_AUTH_HOST}" )
+    [[ -n "${PG_INIT_AUTH_LOCAL:-}" ]] && args+=( --auth-local="${PG_INIT_AUTH_LOCAL}" )
+    [[ -n "${PG_INIT_ENCODING:-}" ]] && args+=( --encoding="${PG_INIT_ENCODING}" )
+    [[ -n "${PG_INIT_LOCALE:-}" ]] && args+=( --locale="${PG_INIT_LOCALE}" )
+    [[ -n "${PG_INIT_LOCALE_PROVIDER:-}" ]] && args+=( --locale-provider="${PG_INIT_LOCALE_PROVIDER}" )
+    [[ -n "${PG_INIT_ICU_LOCALE:-}" ]] && args+=( --icu-locale="${PG_INIT_ICU_LOCALE}" )
+    [[ -n "${PG_INIT_WALDIR:-}" ]] && args+=( --waldir="${PG_INIT_WALDIR}" )
+    [[ -n "${PG_INIT_WAL_SEGSIZE:-}" ]] && args+=( --wal-segsize="${PG_INIT_WAL_SEGSIZE}" )
+
+    if [[ "${PG_INIT_ALLOW_GROUP_ACCESS:-no}" == "yes" ]]; then
+      args+=( --allow-group-access )
+    fi
+
+    if [[ "${PG_INIT_DATA_CHECKSUMS:-on}" == "on" ]]; then
+      args+=( --data-checksums )
+    else
+      args+=( --no-data-checksums )
+    fi
+
+    exec "${BIN_DIR}/initdb" "${args[@]}"
+    ;;
+
+  basebackup)
+    source /run/pgvm/op.env
+
+    : "${PG_BB_PGMAJOR:?required unless PG_BB_BIN_DIR is set}"
+    : "${PG_BB_SOURCE_CONNSTR:?required}"
+    : "${PG_BB_TARGET_DIR:?required}"
+
+    BIN_DIR="$(resolve_bin_dir "${PG_BB_PGMAJOR}" "${PG_BB_BIN_DIR:-}")"
+
+    args=(
+      --dbname="${PG_BB_SOURCE_CONNSTR}"
+      --pgdata="${PG_BB_TARGET_DIR}"
+    )
+
+    [[ -n "${PG_BB_FORMAT:-}" ]] && args+=( --format="${PG_BB_FORMAT}" )
+    [[ -n "${PG_BB_WAL_METHOD:-}" ]] && args+=( --wal-method="${PG_BB_WAL_METHOD}" )
+    [[ -n "${PG_BB_SLOT:-}" ]] && args+=( --slot="${PG_BB_SLOT}" )
+    [[ -n "${PG_BB_MAX_RATE:-}" ]] && args+=( --max-rate="${PG_BB_MAX_RATE}" )
+    [[ -n "${PG_BB_LABEL:-}" ]] && args+=( --label="${PG_BB_LABEL}" )
+    [[ -n "${PG_BB_COMPRESS:-}" ]] && args+=( --compress="${PG_BB_COMPRESS}" )
+    [[ -n "${PG_BB_INCREMENTAL_MANIFEST:-}" ]] && args+=( --incremental="${PG_BB_INCREMENTAL_MANIFEST}" )
+
+    [[ "${PG_BB_CREATE_SLOT:-no}" == "yes" ]] && args+=( --create-slot )
+    [[ "${PG_BB_WRITE_RECOVERY_CONF:-no}" == "yes" ]] && args+=( --write-recovery-conf )
+    [[ "${PG_BB_PROGRESS:-yes}" == "yes" ]] && args+=( --progress )
+    [[ "${PG_BB_NO_SYNC:-no}" == "yes" ]] && args+=( --no-sync )
+
+    exec "${BIN_DIR}/pg_basebackup" "${args[@]}"
+    ;;
+
+  rewind)
+    source /run/pgvm/op.env
+
+    : "${PG_RW_PGMAJOR:?required unless PG_RW_BIN_DIR is set}"
+    : "${PG_RW_TARGET_PGDATA:?required}"
+
+    BIN_DIR="$(resolve_bin_dir "${PG_RW_PGMAJOR}" "${PG_RW_BIN_DIR:-}")"
+
+    args=( --target-pgdata="${PG_RW_TARGET_PGDATA}" )
+
+    if [[ -n "${PG_RW_SOURCE_PGDATA:-}" ]]; then
+      args+=( --source-pgdata="${PG_RW_SOURCE_PGDATA}" )
+    elif [[ -n "${PG_RW_SOURCE_CONNSTR:-}" ]]; then
+      args+=( --source-server="${PG_RW_SOURCE_CONNSTR}" )
+    else
+      echo "set PG_RW_SOURCE_PGDATA or PG_RW_SOURCE_CONNSTR" >&2
+      exit 1
+    fi
+
+    [[ "${PG_RW_WRITE_RECOVERY_CONF:-no}" == "yes" ]] && args+=( --write-recovery-conf )
+    [[ "${PG_RW_RESTORE_TARGET_WAL:-no}" == "yes" ]] && args+=( --restore-target-wal )
+    [[ "${PG_RW_DRY_RUN:-no}" == "yes" ]] && args+=( --dry-run )
+    [[ "${PG_RW_PROGRESS:-yes}" == "yes" ]] && args+=( --progress )
+    [[ "${PG_RW_NO_SYNC:-no}" == "yes" ]] && args+=( --no-sync )
+    [[ "${PG_RW_NO_ENSURE_SHUTDOWN:-no}" == "yes" ]] && args+=( --no-ensure-shutdown )
+    [[ -n "${PG_RW_CONFIG_FILE:-}" ]] && args+=( --config-file="${PG_RW_CONFIG_FILE}" )
+
+    exec "${BIN_DIR}/pg_rewind" "${args[@]}"
+    ;;
+
+  checkpoint)
+    source /run/pgvm/op.env
+    : "${PG_CP_CONNSTR:?required}"
+    exec psql "${PG_CP_CONNSTR}" -v ON_ERROR_STOP=1 -X -c 'CHECKPOINT'
+    ;;
+
+  promote)
+    source /run/pgvm/op.env
+    : "${PG_PROMOTE_CONNSTR:?required}"
+    WAIT="${PG_PROMOTE_WAIT:-true}"
+    WAIT_SECONDS="${PG_PROMOTE_WAIT_SECONDS:-60}"
+    exec psql "${PG_PROMOTE_CONNSTR}" -v ON_ERROR_STOP=1 -X -c "SELECT pg_promote(${WAIT}, ${WAIT_SECONDS});"
+    ;;
+
+  *)
+    echo "unsupported operation: $OP" >&2
+    exit 1
+    ;;
+esac
+```
+
+## 7) Supported dynamic parameters
+
+This is the whitelist I would support.
+
+For **stop**:
+
+* `PG_STOP_MODE=smart|fast|immediate`
+* `PG_STOP_TIMEOUT=<seconds>`
+  Defaults:
+* `fast`
+* `90`
+
+For **initdb**:
+
+* `PG_INIT_PGDATA` required
+* `PG_INIT_PGMAJOR` or `PG_INIT_BIN_DIR`
+* `PG_INIT_USERNAME`
+* `PG_INIT_PWFILE`
+* `PG_INIT_AUTH`
+* `PG_INIT_AUTH_HOST`
+* `PG_INIT_AUTH_LOCAL`
+* `PG_INIT_ENCODING`
+* `PG_INIT_LOCALE`
+* `PG_INIT_LOCALE_PROVIDER`
+* `PG_INIT_ICU_LOCALE`
+* `PG_INIT_WALDIR`
+* `PG_INIT_WAL_SEGSIZE`
+* `PG_INIT_ALLOW_GROUP_ACCESS=yes|no`
+* `PG_INIT_DATA_CHECKSUMS=on|off`
+
+`initdb` supports setting auth method, encoding, locale, locale provider, ICU locale, WAL directory, bootstrap user, and checksum behavior. Current PostgreSQL docs say checksums are enabled by default, but because you run multiple major versions, set checksum behavior explicitly in your wrapper rather than depending on version-specific defaults. ([postgresql.org][3])
+
+For **basebackup**:
+
+* `PG_BB_PGMAJOR` or `PG_BB_BIN_DIR`
+* `PG_BB_SOURCE_CONNSTR` required
+* `PG_BB_TARGET_DIR` required
+* `PG_BB_FORMAT=plain|tar`
+* `PG_BB_WAL_METHOD=stream|fetch|none`
+* `PG_BB_SLOT`
+* `PG_BB_CREATE_SLOT=yes|no`
+* `PG_BB_MAX_RATE`
+* `PG_BB_LABEL`
+* `PG_BB_COMPRESS`
+* `PG_BB_INCREMENTAL_MANIFEST`
+* `PG_BB_WRITE_RECOVERY_CONF=yes|no`
+* `PG_BB_PROGRESS=yes|no`
+* `PG_BB_NO_SYNC=yes|no`
+
+`pg_basebackup` takes a base backup of a running cluster over the replication protocol. The connecting role must have `REPLICATION` or be superuser, `pg_hba.conf` must allow the replication connection, and the server needs enough `max_wal_senders`. It can back up a primary or a standby; on a standby, `full_page_writes` must be enabled on the primary. Common flags include `--wal-method`, `--slot`, `--create-slot`, `--max-rate`, `--compress`, `--write-recovery-conf`, and `--incremental`. ([postgresql.org][4])
+
+For **rewind**:
+
+* `PG_RW_PGMAJOR` or `PG_RW_BIN_DIR`
+* `PG_RW_TARGET_PGDATA` required
+* exactly one of `PG_RW_SOURCE_PGDATA` or `PG_RW_SOURCE_CONNSTR`
+* `PG_RW_WRITE_RECOVERY_CONF=yes|no`
+* `PG_RW_RESTORE_TARGET_WAL=yes|no`
+* `PG_RW_DRY_RUN=yes|no`
+* `PG_RW_PROGRESS=yes|no`
+* `PG_RW_NO_SYNC=yes|no`
+* `PG_RW_NO_ENSURE_SHUTDOWN=yes|no`
+* `PG_RW_CONFIG_FILE`
+
+`pg_rewind` is for resynchronizing a diverged former primary with the new source cluster. The target must be shut down cleanly unless you let `pg_rewind` ensure shutdown itself; source can be an offline data directory or a running server connection. `--restore-target-wal` can fetch missing WAL using the target cluster’s `restore_command`, and `--write-recovery-conf` creates `standby.signal` plus recovery connection settings, but it requires `--source-server`. ([postgresql.org][5])
+
+For **checkpoint**:
+
+* `PG_CP_CONNSTR` required
+
+The wrapper simply runs `CHECKPOINT` through `psql`. PostgreSQL documents that `CHECKPOINT` forces an immediate checkpoint and is not intended for normal operation; only superusers or users with the `pg_checkpoint` role can execute it. ([postgresql.org][6])
+
+For **promote**:
+
+* `PG_PROMOTE_CONNSTR` required
+* `PG_PROMOTE_WAIT=true|false`
+* `PG_PROMOTE_WAIT_SECONDS=<seconds>`
+
+Using `SELECT pg_promote(wait, wait_seconds)` is clean because the parameters are explicit and documented. PostgreSQL also documents `pg_ctl promote` as a valid promote path, but the SQL function gives you easy runtime control over wait behavior from `vm-control`. ([postgresql.org][7])
+
+## 8) How `vm-control` should use this
+
+For server start:
+
+1. write `/run/pgvm/cluster.env`
+2. `systemctl start pgvm-postgres.service`
+
+For server stop:
+
+1. optionally write `/run/pgvm/stop.env`
+2. `systemctl stop pgvm-postgres.service`
+
+For init/basebackup/rewind/checkpoint/promote:
+
+1. write `/run/pgvm/op.env`
+2. `systemctl start pgvm-postgres-op@<operation>.service`
+
+That gives you:
+
+* `vm-control` and its supervisor in one cgroup
+* PostgreSQL daemon in another
+* each maintenance job in its own oneshot unit
+
+## 9) Enable and load the units
+
+```bash
+chmod 755 /usr/local/bin/pgvm-postgres-launch
+chmod 755 /usr/local/bin/pgvm-postgres-stop
+chmod 755 /usr/local/bin/pgvm-postgres-reload
+chmod 755 /usr/local/bin/pgvm-postgres-stop-post
+chmod 755 /usr/local/bin/pgvm-postgres-op
+
+systemctl daemon-reload
+systemctl enable pgvm-postgres.service
+```
+
+I would **not** enable the operation unit; it should be started only on demand.
+
+## 10) My blunt recommendation
+
+This is the clean production shape:
+
+* one generic **daemon** unit: `pgvm-postgres.service`
+* one generic **ops** template: `pgvm-postgres-op@.service`
+* runtime state under `/run/pgvm/`
+* all runtime choices controlled by files written by `vm-control`
+* whitelisted PostgreSQL-supported parameters only, not arbitrary command pass-through
+
+That gives you a stable control plane, clear cgroup boundaries, dynamic stop modes with sane defaults, and clean separation between “server lifecycle” and “administrative jobs.”
+
+[1]: https://man7.org/linux/man-pages/man5/systemd.service.5.html "systemd.service(5) - Linux manual page"
+[2]: https://www.postgresql.org/docs/current/app-pg-ctl.html "PostgreSQL: Documentation: 18: pg_ctl"
+[3]: https://www.postgresql.org/docs/current/app-initdb.html "PostgreSQL: Documentation: 18: initdb"
+[4]: https://www.postgresql.org/docs/current/app-pgbasebackup.html "PostgreSQL: Documentation: 18: pg_basebackup"
+[5]: https://www.postgresql.org/docs/current/app-pgrewind.html "PostgreSQL: Documentation: 18: pg_rewind"
+[6]: https://www.postgresql.org/docs/current/sql-checkpoint.html "PostgreSQL: Documentation: 18: CHECKPOINT"
+[7]: https://www.postgresql.org/docs/current/functions-admin.html "PostgreSQL: Documentation: 18: 9.28. System Administration Functions"
+
+
+Assuming you set up these two units:
+
+* `pgvm-postgres.service`
+* `pgvm-postgres-op@.service`
+
+and these runtime files:
+
+* `/run/pgvm/cluster.env`
+* `/run/pgvm/stop.env`
+* `/run/pgvm/op.env`
+
+here are the exact ways to invoke everything.
+
+## 0) First time after creating or changing unit files
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable vm-control.service
+sudo systemctl enable pgvm-postgres.service
+```
+
+If you only change `/run/pgvm/*.env`, you do **not** need `daemon-reload`.
 
 ---
 
-## The pain point we’re solving
+## 1) Start PostgreSQL
 
-Traditional host dashboards often fail in the most critical window:
+Write the runtime cluster info first.
 
-* You spot a spike, but by the time you inspect the host, the top process list has changed.
-* You get one “current” view with no timeline, so you can’t correlate to the exact incident minute.
-* Refresh is either too slow (misses the event) or too aggressive (wastes cycles on already-stressed hosts).
+```bash
+sudo mkdir -p /run/pgvm
 
-In real incidents, **minutes matter**, and **context matters even more**.
+sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
+PGMAJOR=16
+PG_BIN_DIR=/usr/pgsql-16/bin
+PGDATA=/data/local/mydb/16/data
+PGPORT=5432
+PGCLUSTER_NAME=mydb
+PGOPTS=
+EOF
+```
 
----
+Then start:
 
-## What’s new in HostDetails
+```bash
+sudo systemctl start pgvm-postgres.service
+```
 
-### 1) TOP snapshots that preserve “what was happening”
+Check status:
 
-HostDetails now supports **multiple TOP snapshots** per host. Each snapshot is time-stamped and selectable, letting you:
+```bash
+sudo systemctl status pgvm-postgres.service
+```
 
-* View top processes for **a specific moment**
-* Compare “before vs during vs after” overload
-* Avoid the “I refreshed and lost the smoking gun” problem
+See logs:
 
-This is especially useful for:
-
-* Sudden CPU storms (runaway query / batch / cron)
-* Memory pressure causing swapping and cascading latency
-* I/O saturation (log storms, vacuum bursts, runaway backups)
-
-**Bottom line:** snapshots turn a transient overload into an **inspectable event**.
-
----
-
-### 2) Incident-first workflow: identify → filter → act
-
-HostDetails is optimized for the responder loop:
-
-1. **Pick the incident timestamp snapshot**
-2. Go straight to **Top Processes**
-3. Use filters to isolate likely culprits:
-
-   * **Filter by command** (quickly narrow by service/binary/job name)
-   * **Filter/sort by CPU%**
-   * **Filter/sort by MEM%**
-4. Decide the safest mitigation:
-
-   * Stop the runaway worker/job
-   * Restart a bad actor service
-   * Kill orphaned heavy processes
-   * Escalate with concrete evidence (command + PID + resource usage)
-
-This reduces guesswork and makes post-incident review far more objective.
+```bash
+sudo journalctl -u pgvm-postgres.service -f
+```
 
 ---
 
-## Adaptive refresh: fast when it matters, quiet when it doesn’t
+## 2) Stop PostgreSQL with defaults
 
-Instead of refreshing on a fixed interval, HostDetails now supports **dynamic refresh based on current resource stress**. The refresh rate is driven by the **maximum** of CPU%, MEM%, or IO% (i.e., whichever is worst).
+If you do nothing, your stop wrapper should default to:
 
-### Refresh policy (based on max(CPU, MEM, IO))
+* `PG_STOP_MODE=fast`
+* `PG_STOP_TIMEOUT=90`
 
-| Max usage band | Refresh interval     |
-| -------------- | -------------------- |
-| **< 50%**      | Every **4 hours**    |
-| **50% – 60%**  | Every **2 hours**    |
-| **60% – 70%**  | Every **1 hour**     |
-| **70% – 80%**  | Every **30 minutes** |
-| **> 80%**      | Every **5 minutes**  |
+So just do:
 
-Why this matters:
-
-* Healthy hosts aren’t constantly polled (less noise, less cost)
-* Hot hosts get rapid updates automatically (faster detection + response)
-* During sustained overload (>80%), the system “locks in” visibility by collecting **frequent snapshots**
+```bash
+sudo systemctl stop pgvm-postgres.service
+```
 
 ---
 
-## Snapshots as an incident timeline (example)
+## 3) Stop PostgreSQL with dynamic stop mode
 
-Imagine an outage window:
+### Smart shutdown
 
-* **10:05** CPU jumps from 35% → 92%
-* **10:07** latency alarms fire, traffic starts backing up
-* **10:10** responder opens HostDetails
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=smart
+PG_STOP_TIMEOUT=300
+EOF
 
-Without snapshots, you might only see the *current* top processes (which may have changed).
-With snapshots, you can select:
+sudo systemctl stop pgvm-postgres.service
+```
 
-* **10:05 snapshot** → identifies the first heavy command that triggered the spike
-* **10:10 snapshot** → confirms whether the same command is still the dominant consumer
-* **10:15 snapshot** → validates recovery after mitigation
+### Fast shutdown
 
-This makes your actions defensible and repeatable: **“We stopped X because snapshot at 10:05 shows it consuming 78% CPU and 22 GB RSS.”**
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=90
+EOF
 
----
+sudo systemctl stop pgvm-postgres.service
+```
 
-## Better process exploration with filters
+### Immediate shutdown
 
-### Filter by command
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=immediate
+PG_STOP_TIMEOUT=30
+EOF
 
-This is the fastest way to answer:
-
-* “Is this the app service, a batch job, a backup, a rogue script, or a DB task?”
-* “Is one specific binary name repeating across the top list?”
-
-### Filter by CPU and memory usage
-
-These filters help you zoom in on:
-
-* High CPU, low memory → tight loops, hot queries, busy polling
-* High memory, moderate CPU → leaks, cache blowups, runaway JVM/node processes
-* High I/O offenders (paired with IO metrics) → logging bursts, backups, vacuum churn
-
-**Combined with snapshots**, these filters become a practical incident “search engine.”
+sudo systemctl stop pgvm-postgres.service
+```
 
 ---
 
-## Why this is a big win for production operations
+## 4) Restart PostgreSQL
 
-* **Faster MTTR:** responders spend less time hunting and more time fixing
-* **Stronger evidence:** “snapshot at incident time” beats screenshots of a moving target
-* **Lower overhead:** refresh rate scales with need (quiet when stable, fast when hot)
-* **Better collaboration:** on-call can share a snapshot timestamp and everyone sees the same truth
-* **Improved postmortems:** you can reconstruct what dominated the host during the incident window
+Normal restart:
+
+```bash
+sudo systemctl restart pgvm-postgres.service
+```
+
+Restart with a chosen stop mode first:
+
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=120
+EOF
+
+sudo systemctl restart pgvm-postgres.service
+```
 
 ---
 
-## What’s next (easy extensions)
+## 5) Reload PostgreSQL config
 
-If we want to push this further, the natural next steps are:
+```bash
+sudo systemctl reload pgvm-postgres.service
+```
 
-* Auto-highlight “top offenders” (e.g., top 3 by CPU/MEM deltas vs baseline)
-* Compare snapshots side-by-side (diff view)
-* Add saved filters (“show only postgres”, “show only java”, “show only backup jobs”)
-* Tie snapshot timestamps to alert timelines (click alert → open HostDetails at that snapshot)
+Check status after reload:
+
+```bash
+sudo systemctl status pgvm-postgres.service
+```
 
 ---
 
-## Closing
+## 6) Init a new database cluster
 
-The upgraded HostDetails makes overload response **time-aware**, **actionable**, and **efficient**.
-Snapshots ensure we don’t lose the truth of the incident moment, and adaptive refresh ensures we capture more detail automatically as stress rises — without wasting cycles when hosts are healthy.
+Write operation parameters:
 
-If you want, paste your current HostDetails UI screenshot and I’ll tailor this blog with the exact component names/sections (and a “how to use it during an incident” walkthrough that matches your layout).
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_INIT_PGMAJOR=16
+PG_INIT_BIN_DIR=/usr/pgsql-16/bin
+PG_INIT_PGDATA=/data/local/mydb/16/data
+PG_INIT_USERNAME=postgres
+PG_INIT_AUTH=scram-sha-256
+PG_INIT_AUTH_HOST=scram-sha-256
+PG_INIT_AUTH_LOCAL=peer
+PG_INIT_ENCODING=UTF8
+PG_INIT_LOCALE=en_US.UTF-8
+PG_INIT_DATA_CHECKSUMS=on
+EOF
+```
+
+Run init:
+
+```bash
+sudo systemctl start pgvm-postgres-op@init.service
+```
+
+See logs:
+
+```bash
+sudo journalctl -u pgvm-postgres-op@init.service -n 200 --no-pager
+```
+
+Then write cluster state and start Postgres:
+
+```bash
+sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
+PGMAJOR=16
+PG_BIN_DIR=/usr/pgsql-16/bin
+PGDATA=/data/local/mydb/16/data
+PGPORT=5432
+PGCLUSTER_NAME=mydb
+PGOPTS=
+EOF
+
+sudo systemctl start pgvm-postgres.service
+```
+
+---
+
+## 7) Run pg_basebackup
+
+Example from a primary using a replication user:
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_BB_PGMAJOR=16
+PG_BB_BIN_DIR=/usr/pgsql-16/bin
+PG_BB_SOURCE_CONNSTR=host=10.0.0.10 port=5432 user=replicator dbname=postgres
+PG_BB_TARGET_DIR=/data/local/mydb/16/data
+PG_BB_FORMAT=plain
+PG_BB_WAL_METHOD=stream
+PG_BB_PROGRESS=yes
+PG_BB_WRITE_RECOVERY_CONF=yes
+PG_BB_CREATE_SLOT=no
+PG_BB_NO_SYNC=no
+EOF
+```
+
+Run it:
+
+```bash
+sudo systemctl start pgvm-postgres-op@basebackup.service
+```
+
+Follow logs:
+
+```bash
+sudo journalctl -u pgvm-postgres-op@basebackup.service -f
+```
+
+A heavier example with slot, rate limit, label, compression:
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_BB_PGMAJOR=16
+PG_BB_BIN_DIR=/usr/pgsql-16/bin
+PG_BB_SOURCE_CONNSTR=host=10.0.0.10 port=5432 user=replicator dbname=postgres
+PG_BB_TARGET_DIR=/data/local/mydb/16/data
+PG_BB_FORMAT=plain
+PG_BB_WAL_METHOD=stream
+PG_BB_SLOT=standby_mydb_01
+PG_BB_CREATE_SLOT=yes
+PG_BB_MAX_RATE=100M
+PG_BB_LABEL=mydb_standby_seed
+PG_BB_COMPRESS=server-gzip
+PG_BB_PROGRESS=yes
+PG_BB_WRITE_RECOVERY_CONF=yes
+EOF
+
+sudo systemctl start pgvm-postgres-op@basebackup.service
+```
+
+---
+
+## 8) Run pg_rewind
+
+### Rewind from source server connection
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_RW_PGMAJOR=16
+PG_RW_BIN_DIR=/usr/pgsql-16/bin
+PG_RW_TARGET_PGDATA=/data/local/mydb/16/data
+PG_RW_SOURCE_CONNSTR=host=10.0.0.11 port=5432 user=postgres dbname=postgres
+PG_RW_WRITE_RECOVERY_CONF=yes
+PG_RW_PROGRESS=yes
+PG_RW_NO_SYNC=no
+EOF
+
+sudo systemctl start pgvm-postgres-op@rewind.service
+```
+
+### Dry run first
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_RW_PGMAJOR=16
+PG_RW_BIN_DIR=/usr/pgsql-16/bin
+PG_RW_TARGET_PGDATA=/data/local/mydb/16/data
+PG_RW_SOURCE_CONNSTR=host=10.0.0.11 port=5432 user=postgres dbname=postgres
+PG_RW_DRY_RUN=yes
+PG_RW_PROGRESS=yes
+EOF
+
+sudo systemctl start pgvm-postgres-op@rewind.service
+```
+
+### Rewind from source data directory
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_RW_PGMAJOR=16
+PG_RW_BIN_DIR=/usr/pgsql-16/bin
+PG_RW_TARGET_PGDATA=/data/local/mydb/16/data
+PG_RW_SOURCE_PGDATA=/data/source_cluster/16/data
+PG_RW_PROGRESS=yes
+EOF
+
+sudo systemctl start pgvm-postgres-op@rewind.service
+```
+
+---
+
+## 9) Run a CHECKPOINT
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_CP_CONNSTR=postgresql://postgres@127.0.0.1:5432/postgres
+EOF
+
+sudo systemctl start pgvm-postgres-op@checkpoint.service
+```
+
+Check logs:
+
+```bash
+sudo journalctl -u pgvm-postgres-op@checkpoint.service -n 100 --no-pager
+```
+
+---
+
+## 10) Promote a standby
+
+### Wait until promotion completes
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_PROMOTE_CONNSTR=postgresql://postgres@127.0.0.1:5432/postgres
+PG_PROMOTE_WAIT=true
+PG_PROMOTE_WAIT_SECONDS=60
+EOF
+
+sudo systemctl start pgvm-postgres-op@promote.service
+```
+
+### Fire and return quickly
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_PROMOTE_CONNSTR=postgresql://postgres@127.0.0.1:5432/postgres
+PG_PROMOTE_WAIT=false
+PG_PROMOTE_WAIT_SECONDS=0
+EOF
+
+sudo systemctl start pgvm-postgres-op@promote.service
+```
+
+---
+
+## 11) Common inspection commands
+
+See whether PostgreSQL is active:
+
+```bash
+sudo systemctl is-active pgvm-postgres.service
+```
+
+See whether it is enabled on boot:
+
+```bash
+sudo systemctl is-enabled pgvm-postgres.service
+```
+
+Show recent logs:
+
+```bash
+sudo journalctl -u pgvm-postgres.service -n 200 --no-pager
+```
+
+Show operation logs:
+
+```bash
+sudo journalctl -u pgvm-postgres-op@basebackup.service -n 200 --no-pager
+sudo journalctl -u pgvm-postgres-op@rewind.service -n 200 --no-pager
+sudo journalctl -u pgvm-postgres-op@init.service -n 200 --no-pager
+sudo journalctl -u pgvm-postgres-op@checkpoint.service -n 200 --no-pager
+sudo journalctl -u pgvm-postgres-op@promote.service -n 200 --no-pager
+```
+
+Reset failed unit state if needed:
+
+```bash
+sudo systemctl reset-failed pgvm-postgres.service
+sudo systemctl reset-failed pgvm-postgres-op@basebackup.service
+```
+
+---
+
+## 12) Full realistic flows
+
+### A. New database creation flow
+
+```bash
+sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
+PG_INIT_PGMAJOR=16
+PG_INIT_BIN_DIR=/usr/pgsql-16/bin
+PG_INIT_PGDATA=/data/local/orders/16/data
+PG_INIT_USERNAME=postgres
+PG_INIT_AUTH=scram-sha-256
+PG_INIT_AUTH_HOST=scram-sha-256
+PG_INIT_AUTH_LOCAL=peer
+PG_INIT_ENCODING=UTF8
+PG_INIT_LOCALE=en_US.UTF-8
+PG_INIT_DATA_CHECKSUMS=on
+EOF
+
+sudo systemctl start pgvm-postgres-op@init.service
+
+sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
+PGMAJOR=16
+PG_BIN_DIR=/usr/pgsql-16/bin
+PGDATA=/data/local/orders/16/data
+PGPORT=5432
+PGCLUSTER_NAME=orders
+PGOPTS=
+EOF
+
+sudo systemctl start pgvm-postgres.service
+```
+
+### B. Existing persistent disk boot flow
+
+```bash
+sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
+PGMAJOR=14
+PG_BIN_DIR=/usr/pgsql-14/bin
+PGDATA=/data/local/existingdb/14/data
+PGPORT=5432
+PGCLUSTER_NAME=existingdb
+PGOPTS=
+EOF
+
+sudo systemctl start pgvm-postgres.service
+```
+
+### C. Planned graceful maintenance stop
+
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=smart
+PG_STOP_TIMEOUT=600
+EOF
+
+sudo systemctl stop pgvm-postgres.service
+```
+
+### D. Normal operational restart
+
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=120
+EOF
+
+sudo systemctl restart pgvm-postgres.service
+```
+
+### E. Emergency stop
+
+```bash
+sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
+PG_STOP_MODE=immediate
+PG_STOP_TIMEOUT=30
+EOF
+
+sudo systemctl stop pgvm-postgres.service
+```
+
+---
+
+## 13) What `vm-control` would actually run
+
+For start:
+
+```bash
+systemctl start pgvm-postgres.service
+```
+
+For stop with defaults:
+
+```bash
+rm -f /run/pgvm/stop.env
+systemctl stop pgvm-postgres.service
+```
+
+For stop with smart mode:
+
+```bash
+cat > /run/pgvm/stop.env <<'EOF'
+PG_STOP_MODE=smart
+PG_STOP_TIMEOUT=300
+EOF
+systemctl stop pgvm-postgres.service
+```
+
+For basebackup:
+
+```bash
+cat > /run/pgvm/op.env <<'EOF'
+PG_BB_PGMAJOR=16
+PG_BB_BIN_DIR=/usr/pgsql-16/bin
+PG_BB_SOURCE_CONNSTR=host=10.0.0.10 port=5432 user=replicator dbname=postgres
+PG_BB_TARGET_DIR=/data/local/mydb/16/data
+PG_BB_WAL_METHOD=stream
+PG_BB_PROGRESS=yes
+PG_BB_WRITE_RECOVERY_CONF=yes
+EOF
+systemctl start pgvm-postgres-op@basebackup.service
+```
+
+---
+
+If you want, I can next give you the same thing as a **single README-style runbook** with the exact unit files and wrapper scripts in one place.
+
