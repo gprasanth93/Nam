@@ -1,0 +1,204 @@
+# Host Profile Just Got Smarter: Better KVM Visibility for Capacity Planning
+
+We’ve rolled out a fresh set of updates to **Host Profile** to make it much easier to understand how KVM databases are distributed across hosts, how much capacity is really being used, and where we still have room to grow.
+
+This is especially useful right now as we continue the drive to move **bare-metal PostgreSQL databases to KVM**. As more databases move over, we need better visibility not just into box-level metrics, but also into how database placement, overcommit, and actual resource usage come together on each host.
+
+These new changes are aimed at making that much clearer.
+
+## A better home page view of KVM usage
+
+The Host Profile home page table now gives a much more complete per-host summary of KVM usage.
+
+In addition to the existing host-level information, it now shows:
+
+* **KVM DB count**
+* **KVM DB state summary**
+* **KVM CPU**
+* **KVM Memory**
+* **KVM Swap**
+* **KVM Disk**
+
+This gives a quick snapshot of how heavily each host is being used by KVM databases and what kind of database mix it is carrying.
+
+Instead of only seeing infrastructure health, we can now also see the database footprint sitting on top of that infrastructure.
+
+## A more holistic view of host load
+
+One of the most useful improvements is that Host Profile now gives a more **holistic view of load and database distribution per host**.
+
+A host may look healthy if you only check CPU or memory, but that is not always enough for good placement decisions. It may already have a high number of KVM databases, too many primaries, or an uneven spread of important workloads.
+
+By bringing together:
+
+* **LoadScore**
+* **SharedLoad**
+* **KVM DB count**
+* **KVM DB states**
+* **aggregate KVM CPU, memory, swap, and disk usage**
+
+we get a much better picture of real host pressure.
+
+This helps us answer practical questions like:
+
+* Which hosts are already dense with KVM databases?
+* Which hosts are carrying more primaries, standbys, PITR, or snapshot workloads?
+* Which hosts still look safe for new placements?
+* Which hosts may appear fine on one metric, but are already stretched when viewed more completely?
+
+## Overcommit vs actual usage helps better placement
+
+Another important part of this update is that it becomes easier to compare **allocated capacity vs actual usage**.
+
+For KVM planning, looking at **vCPU overcommit, memory overcommit, and disk overcommit** alongside real usage is very valuable.
+
+That means we can now think about a host in two ways:
+
+* how much has been allocated or committed
+* how much is actually being used right now
+
+This matters because a host may still look comfortable on current usage, but already be heavily committed from an allocation point of view. Or the reverse: a host may look highly allocated, but actual usage may show that it still has enough operating headroom for the right kind of placement.
+
+Seeing both sides helps us make safer and smarter decisions for:
+
+* new database placement
+* migration planning
+* host balancing
+* future growth planning
+
+## Dynamic column groups and filters
+
+We’ve also added **dynamic filters for column groups**, so the table can be tailored to the task at hand.
+
+Users can now choose which groups they want to see, such as:
+
+* **Host score**
+* **Host metrics**
+* **KVM database metrics**
+
+This makes the page much more flexible and easier to use.
+
+For example:
+
+* if you are reviewing general host health, you may want host score and host metrics
+* if you are working on database placement or migration planning, you may want to focus on KVM database metrics
+* if you want the full picture, you can keep all of them visible together
+
+This is a small UI change, but in practice it makes the table much easier to work with.
+
+## KVM database drill-down per host
+
+Clicking into the KVM database section for a host now opens a dedicated **KVM Databases** view.
+
+This view gives a much clearer breakdown of what is actually running on that host, including:
+
+* total database count
+* database state summary
+* CPU summary
+* memory summary
+* disk summary
+* snapshot-based visibility over time
+
+This makes it easy to move from a host-level view to a more detailed database-level view without losing context.
+
+It is especially useful when you want to understand why a host is busy, how databases are distributed on it, or whether a host is carrying more important workloads than expected.
+
+## Snapshot visibility for point-in-time review
+
+The KVM database view also includes **snapshots**, which makes it easier to look at host and database details at specific collection times.
+
+This is useful for:
+
+* reviewing recent changes
+* comparing resource patterns across snapshots
+* checking what the host looked like around a spike or incident
+* understanding whether the current state matches the recent trend
+
+That gives Host Profile more operational value beyond just being a static inventory page.
+
+## Easier links into the right operational tools
+
+We’ve also made navigation easier from the KVM database view.
+
+* Clicking on the **database name** takes you to the relevant **PGaaS dashboard / PgMaker**
+* Clicking on the **overall load** takes you to **Grafana KVM metrics**
+
+This makes investigations much faster.
+
+Instead of manually searching across multiple tools, you can jump directly from Host Profile into the right place for deeper analysis, whether you want database details in PgMaker or host-level metrics in Grafana.
+
+## Load Projection for planning bigger moves
+
+Another key feature is **Load Projection**.
+
+This is especially helpful when we want to plan operational changes and understand how load would be redistributed before we act.
+
+That includes cases like:
+
+* **per-box rebuilds**
+* **datacenter role swaps for compliance**
+* **host redistribution exercises**
+* **migration planning for bare-metal to KVM**
+
+Load Projection helps us estimate how load will move across selected hosts and what the result may look like after the change.
+
+This helps answer important questions up front:
+
+* Can we do a role swap without disruption?
+* Can the remaining hosts safely absorb the redistributed load?
+* Do we need additional boxes to handle current demand?
+* Do we need more capacity to support future KVM database growth and service deployments?
+* Will the new distribution still stay balanced after the move?
+
+That makes Load Projection useful not just for migrations, but also for compliance work, rebuild planning, and general capacity forecasting.
+
+## Why this matters for the bare-metal to KVM drive
+
+As we move more bare-metal PostgreSQL databases onto KVM, placement quality matters more and more.
+
+These Host Profile improvements help us make better decisions by giving us:
+
+* better visibility into database density per host
+* clearer state distribution across hosts
+* a better understanding of overcommit vs actual usage
+* easier drill-down into host and database details
+* faster navigation into PgMaker and Grafana
+* load projection for future planning
+
+In other words, this is helping Host Profile evolve from a simple host listing into a much more practical tool for **capacity management, placement planning, and operational decision-making**.
+
+## How to use it
+
+A simple way to use the new flow:
+
+Start from the **Host Profile home page** to review host load, shared load, and KVM summaries.
+
+Use the **dynamic filters** to show the column groups most relevant to your task.
+
+Click into a host’s **KVM database section** to see the detailed database-level view for that host.
+
+From there:
+
+* click a **database name** to open **PGaaS / PgMaker**
+* click **overall load** to open **Grafana KVM metrics**
+
+And if you are planning a bigger migration, rebuild, or compliance-driven role swap, use **Load Projection** to understand how the environment may look after redistribution.
+
+## Closing thoughts
+
+These updates make Host Profile much more useful and much more actionable.
+
+We now have a friendlier way to see:
+
+* KVM database usage per host
+* holistic host pressure
+* database distribution
+* overcommit vs actual usage
+* drill-down details and snapshots
+* projected redistribution during bigger operational changes
+
+As KVM continues to grow, this kind of visibility becomes essential for making safer placement decisions and planning capacity with more confidence.
+
+Host Profile is now a much stronger entry point for understanding where our KVM databases are, how our hosts are being used, and how we should plan for what comes next.
+
+If you want, I can turn this into a more polished **internal announcement style post with headings + screenshot captions** next.
