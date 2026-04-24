@@ -1,0 +1,25 @@
+[Unit]
+Description=PgMaker VM Control
+After=network-online.target local-fs.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=appuser
+Group=appuser
+WorkingDirectory=/opt/vm-control
+ExecStart=/usr/bin/node /opt/vm-control/pgmaker_vm_control.js
+Restart=always
+RestartSec=2
+TimeoutStopSec=30
+OOMScoreAdjust=-900
+MemoryLow=256M
+MemoryMin=256M
+MemoryMax=512M
+MemorySwapMax=128M
+CPUWeight=1000
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

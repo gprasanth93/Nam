@@ -1,0 +1,20 @@
+[Unit]
+Description=PgMaker PostgreSQL operation %i
+After=local-fs.target network-online.target
+Wants=network-online.target
+ConditionPathExists=/run/pgvm/cluster.env
+ConditionPathExists=/run/pgvm/op.env
+
+[Service]
+Type=oneshot
+User=appuser
+Group=appuser
+ExecStart=/usr/local/bin/pgvm-postgres-op %i
+TimeoutStartSec=infinity
+OOMScoreAdjust=300
+MemoryHigh=70%
+MemoryMax=80%
+MemorySwapMax=1G
+CPUWeight=50
+StandardOutput=journal
+StandardError=journal

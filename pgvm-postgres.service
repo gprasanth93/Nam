@@ -1,0 +1,31 @@
+[Unit]
+Description=PgMaker generic PostgreSQL service
+After=local-fs.target network-online.target
+Wants=network-online.target
+ConditionPathExists=/run/pgvm/cluster.env
+
+[Service]
+Type=notify
+User=appuser
+Group=appuser
+ExecStart=/usr/local/bin/pgvm-postgres-launch
+ExecStop=/usr/local/bin/pgvm-postgres-stop
+ExecReload=/usr/local/bin/pgvm-postgres-reload
+ExecStopPost=/usr/local/bin/pgvm-postgres-stop-post
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=infinity
+TimeoutStopSec=600
+KillMode=control-group
+OOMScoreAdjust=300
+MemoryHigh=75%
+MemoryMax=85%
+MemorySwapMax=1G
+CPUWeight=100
+LimitNOFILE=131072
+TasksMax=8192
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
