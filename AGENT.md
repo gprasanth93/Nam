@@ -1,470 +1,766 @@
-# AGENT.md - PgMaker VM control rules after removing `supervisor.js`
+# AGENT.md — PgMaker VM-Control Sidecar Systemd Migration
 
-## Purpose
+## Goal
 
-This project manages PostgreSQL inside Firecracker VMs. The old design used `supervisor.js` to spawn PostgreSQL as a child process, watch child exit, and signal health over a socket back to `vm-control`. The new design removes `supervisor.js` entirely and moves PostgreSQL daemon ownership into systemd.
+Update the **vm-control sidecar project** so the PostgreSQL lifecycle scripts and systemd unit files live in the **sidecar package**, not only in the Firecracker VM image/bootstrap.
 
-Any future changes to `vm-control` must follow this document.
-
----
-
-## New architecture
-
-### Control plane
-
-- `vm-control.service` remains the always-on Node.js service.
-- `vm-control` is the control-plane API and state broadcaster.
-- `vm-control` must no longer spawn PostgreSQL directly.
-- `vm-control` must no longer start or manage `supervisor.js`.
-- `supervisor.js` must be removed from the runtime path and code path.
-
-### Database daemon
-
-- PostgreSQL runs only as `pgvm-postgres.service`.
-- systemd owns the main PostgreSQL process.
-- systemd provides the PostgreSQL cgroup boundary.
-- all PostgreSQL child processes stay under the PostgreSQL unit cgroup.
-
-### One-shot operations
-
-- `initdb`, `basebackup`, `rewind`, `checkpoint`, and `promote` run through `pgvm-postgres-op@.service`.
-- these actions must not run as child processes of `vm-control`.
-- these actions must not run inside the `vm-control.service` cgroup.
-- `vm-control` must invoke them through `systemctl start pgvm-postgres-op@<operation>.service`.
+The VM image should keep only the minimum needed to start `vm-control`. The sidecar should be able to install or override the PgVM PostgreSQL scripts and systemd unit files at runtime, so future fixes can be delivered by upgrading the sidecar package from Nexus instead of rebuilding the VM image.
 
 ---
 
-## Required high-level behavior
+## Existing components
 
-### Start path
+The VM image/bootstrap currently owns these base files:
 
-When a VM boots or when a new DB is created:
+```text
+/etc/systemd/system/vm-control.service
+/usr/local/bin/vm-control-run
+/etc/vm-control/env
+```
 
-1. `vm-control` determines whether a cluster already exists.
-2. `vm-control` determines PostgreSQL version, data directory, port, and cluster name.
-3. `vm-control` writes `/run/pgvm/cluster.env`.
-4. `vm-control` calls `systemctl start pgvm-postgres.service`.
-5. `vm-control` observes PostgreSQL state via systemd and readiness checks.
-6. `vm-control` broadcasts state changes to its existing consumers.
+`vm-control-manager` downloads/upgrades the sidecar package from Nexus.
 
-### Stop path
+`vm-control-run` runs the currently deployed sidecar package.
 
-1. `vm-control` optionally writes `/run/pgvm/stop.env`.
-2. `vm-control` calls `systemctl stop pgvm-postgres.service`.
-3. the service's `ExecStop` wrapper reads the stop env and performs `pg_ctl stop` with the requested mode.
-4. if no stop env exists, defaults are used.
-
-### Restart path
-
-1. `vm-control` optionally writes `/run/pgvm/stop.env`.
-2. `vm-control` calls `systemctl restart pgvm-postgres.service`.
-3. systemd runs `ExecStop`, then `ExecStart` again.
-
-### Reload path
-
-- `vm-control` calls `systemctl reload pgvm-postgres.service`.
-
-### One-shot operation path
-
-1. `vm-control` writes `/run/pgvm/op.env`.
-2. `vm-control` calls `systemctl start pgvm-postgres-op@<operation>.service`.
-3. `vm-control` reads logs or unit status if needed.
-4. `vm-control` removes or overwrites `/run/pgvm/op.env` for the next action.
+Historically, `supervisor.js` started PostgreSQL as a child process and reported DB health through a local socket. The new design should remove PostgreSQL ownership from `supervisor.js` and run PostgreSQL through systemd.
 
 ---
 
-## Runtime file contracts
+## Important ownership rule
+
+Keep this in the **VM image/bootstrap**:
+
+```text
+vm-control.service
+vm-control-run
+vm-control-manager
+minimum env/profile wiring needed to start vm-control
+```
+
+Move this into the **sidecar package**:
+
+```text
+pgvm scripts
+pgvm systemd units
+pgvm install/update logic
+pgvm state helper
+```
+
+The sidecar cannot create `vm-control.service` before the sidecar itself is running. So the base VM image still needs to start `vm-control`.
+
+---
+
+## Target sidecar package layout
+
+Add this under the sidecar release:
+
+```text
+<sidecar-release>/
+  pgvm/
+    install.sh
+    pgvm-postgres-common.sh
+    pgvm-postgres-launch
+    pgvm-postgres-stop
+    pgvm-postgres-stop-post
+    pgvm-postgres-reload
+    pgvm-postgres-op
+    pgvm-postgres-op-status
+    pgvm-postgres-state
+
+  systemd/
+    pgvm-postgres.service
+    pgvm-postgres-op@.service
+    pgvm-control.slice            # optional/recommended
+```
+
+The sidecar should deploy these files into the VM when it starts or when it is upgraded.
+
+---
+
+## Golden install condition
+
+Only install PgVM systemd integration if the VM has `vm-control.service`.
+
+Check with:
+
+```bash
+systemctl cat vm-control.service >/dev/null 2>&1
+```
+
+or:
+
+```bash
+test -f /etc/systemd/system/vm-control.service
+```
+
+If `vm-control.service` does not exist, skip installation and continue without mutating the VM.
+
+Reason: the PgVM integration is only intended for PgMaker VM-control VMs.
+
+---
+
+## Required boot scenarios
+
+### Scenario 1: fresh VM boot
+
+Flow:
+
+```text
+1. systemd starts vm-control.service
+2. vm-control-run starts the sidecar package
+3. sidecar startup calls ensurePgvmSystemdInstalled()
+4. installer detects vm-control.service
+5. installer deploys pgvm scripts and systemd units
+6. installer runs systemctl daemon-reload
+7. sidecar starts API/WebSocket
+8. later, orchestration provides DB/version/data dir
+9. sidecar writes /run/pgvm/cluster.env
+10. sidecar starts pgvm-postgres.service
+```
+
+Do not auto-start Postgres just because the sidecar booted. DB name and PG version are decided later.
+
+### Scenario 2: sidecar upgrade while DB is already running
+
+If `pgvm-postgres.service` is active/activating/deactivating, do **not** restart Postgres and do **not** surprise-change the running unit behavior.
+
+Allowed during upgrade:
+
+```text
+- update /usr/local/bin/pgvm-postgres-* helper scripts atomically
+- update sidecar internal files
+- write pending unit files to /data/local/pgvm/pending-systemd
+- log that systemd unit update is pending until DB is stopped/rebooted
+```
+
+Avoid during upgrade while DB is active:
+
+```text
+- do not stop Postgres
+- do not restart Postgres
+- do not overwrite active unit definitions if that requires daemon-reload
+- do not force daemon-reload for unit changes unless explicitly safe
+```
+
+If `pgvm-postgres.service` is inactive/failed, it is safe to update unit files and run `systemctl daemon-reload`.
+
+---
+
+## Legacy and systemd dual support
+
+The sidecar must support both modes during migration.
+
+### Legacy mode
+
+Use the existing direct command/supervisor flow.
+
+Use legacy mode when:
+
+```text
+- systemd integration is disabled
+- pgvm install fails and mode is auto
+- vm-control.service is missing
+- pgvm-postgres.service is unavailable
+- caller explicitly requests legacy mode
+```
+
+### Systemd mode
+
+Use systemd-managed PostgreSQL.
+
+Use systemd mode when:
+
+```text
+- vm-control.service exists
+- pgvm systemd install succeeds
+- pgvm-postgres.service is present
+- PGVM_SYSTEMD_MODE is auto or required
+```
+
+Recommended config:
+
+```text
+PGVM_SYSTEMD_MODE=auto      # auto | required | disabled
+```
+
+Behavior:
+
+```text
+auto      -> use systemd if installed, otherwise fallback to legacy
+required  -> fail startup or request if systemd install/use fails
+disabled  -> skip systemd flow and keep legacy behavior
+```
+
+Implement this behind one adapter layer:
+
+```text
+dbLifecycle.start()
+dbLifecycle.stop()
+dbLifecycle.restart()
+dbLifecycle.reload()
+dbLifecycle.init()
+dbLifecycle.basebackup()
+dbLifecycle.rewind()
+dbLifecycle.promote()
+dbLifecycle.checkpoint()
+dbLifecycle.state()
+```
+
+Do not scatter `if systemd` checks across the project.
+
+---
+
+## Runtime files
+
+Systemd flow is controlled by runtime files under `/run/pgvm`.
 
 ### `/run/pgvm/cluster.env`
 
-This file is required before any PostgreSQL start.
-
-It must contain enough information to derive the binary path and runtime launch parameters.
-
-Minimum supported keys:
-
-- `PGDATA`
-- one of:
-  - `PG_BIN_DIR`
-  - `PG_HOME`
-  - `PGMAJOR`
-
-Optional keys:
-
-- `PGPORT`
-- `PGCLUSTER_NAME`
-- `PGOPTS`
+Written before starting PostgreSQL.
 
 Example:
 
 ```bash
-PGMAJOR=18
-PG_HOME=/opt/eFX/apps/evolve/postgres/18/usr/pgsql-18
-PG_BIN_DIR=/opt/eFX/apps/evolve/postgres/18/usr/pgsql-18/bin
+PGMAJOR=16
+PG_HOME=/opt/eFX/apps/evolve/postgres/16/usr/pgsql-16
+PG_BIN_DIR=/opt/eFX/apps/evolve/postgres/16/usr/pgsql-16/bin
 PGDATA=/data/local/evolve_access_centre_db_localhost
 PGPORT=5432
 PGCLUSTER_NAME=evolve_access_centre_db_localhost
 PGOPTS=
 ```
 
+Postgres version can be 14, 15, 16, 17, or 18. Do not hardcode version in the unit file.
+
 ### `/run/pgvm/stop.env`
 
-Optional stop behavior overrides.
+Optional. Written before stop/restart when custom stop behavior is needed.
 
-Supported keys:
+Defaults if missing:
 
-- `PG_STOP_MODE=smart|fast|immediate`
-- `PG_STOP_TIMEOUT=<seconds>`
-- `PG_STOP_WAIT=yes|no`
+```bash
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=90
+PG_STOP_WAIT=yes
+```
 
-Default behavior when absent:
+Allowed modes:
 
-- `PG_STOP_MODE=fast`
-- `PG_STOP_TIMEOUT=90`
-- `PG_STOP_WAIT=yes`
+```text
+smart
+fast
+immediate
+```
+
+Example:
+
+```bash
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=300
+PG_STOP_WAIT=yes
+```
 
 ### `/run/pgvm/op.env`
 
-Used only for one-shot operations.
+Written before one-shot operations.
 
-This file is transient and operation-specific.
-
-`vm-control` must write only the variables needed for the chosen operation.
-
----
-
-## Persistent versus runtime state
-
-### Persist on mounted disk
-
-Persist durable cluster identity on the mounted persistent volume.
-
-Recommended durable fields:
-
-- postgres major version
-- PGDATA
-- port
-- cluster name
-- auto-start flag
-- any role hint you track
-
-Recommended durable path:
-
-- `/data/local/pgvm/cluster.json`
-
-`vm-control` should read durable state at boot and derive `/run/pgvm/cluster.env` from it.
-
-### Do not persist
-
-Do not persist `/run/pgvm/stop.env` or `/run/pgvm/op.env`.
-
-These are one-shot control inputs and must not survive reboot.
-
----
-
-## Health and readiness model
-
-### `vm-control` replaces the old supervisor socket
-
-The old supervisor emitted child process state over a socket.
-
-The new model is:
-
-- systemd owns PostgreSQL lifecycle state
-- `vm-control` owns health evaluation and broadcasting
-
-### Source of truth for lifecycle
-
-`vm-control` must use systemd as the source of truth for process lifecycle.
-
-Recommended command:
+Used by:
 
 ```bash
-systemctl show pgvm-postgres.service -p ActiveState -p SubState -p Result -p MainPID
+systemctl start pgvm-postgres-op@init.service
+systemctl start pgvm-postgres-op@basebackup.service
+systemctl start pgvm-postgres-op@rewind.service
+systemctl start pgvm-postgres-op@promote.service
+systemctl start pgvm-postgres-op@checkpoint.service
 ```
 
-### Source of truth for readiness
+---
 
-`vm-control` should use `/usr/local/bin/pgvm-postgres-state` or directly use `pg_isready`.
+## Persistent metadata
 
-Recommended semantics:
+Durable cluster metadata should live on persistent disk, not only `/run`.
 
-- `active` + `pg_isready=0` -> `ready`
-- `active` + `pg_isready=1` -> `running_but_rejecting`
-- `failed` or `inactive` -> `down`
-- `activating` -> `starting`
+Recommended:
 
-### Event broadcasting
+```text
+/data/local/pgvm/cluster.json
+```
 
-`vm-control` should continue broadcasting DB up/down/unhealthy transitions to its current consumers.
+or:
 
-The difference is that events now come from:
+```text
+/data/local/pgvm/cluster.env
+```
 
-- systemd unit state changes
-- readiness probes
+Store durable identity:
 
-and not from a custom supervisor child-process socket.
+```text
+PG major version
+PGDATA
+port
+cluster name
+auto-start flag if needed
+role/topology hint if needed
+```
 
-A first implementation may poll every 1 to 2 seconds. A later implementation may subscribe to systemd D-Bus events.
+Do not persist one-shot `op.env` or `stop.env` as durable desired state. Those are transient.
 
 ---
 
-## Resource ownership and cgroups
+## Systemd unit: pgvm-postgres.service
 
-### Required cgroup boundaries
+Use this as the target shape:
 
-- `vm-control.service` must contain `vm-control` and only its own helper children.
-- `pgvm-postgres.service` must contain PostgreSQL only.
-- `pgvm-postgres-op@.service` must contain one-shot DB operations only.
+```ini
+[Unit]
+Description=PgMaker PostgreSQL Server
+After=local-fs.target network-online.target
+Wants=network-online.target
+ConditionPathExists=/run/pgvm/cluster.env
 
-### Forbidden behavior
+[Service]
+Type=notify
+User=appuser
+Group=appuser
 
-- do not spawn PostgreSQL from `vm-control` with `child_process.spawn()`.
-- do not spawn `pg_basebackup`, `pg_rewind`, or `initdb` as direct children of `vm-control`.
-- do not keep any replacement babysitter process that simply wraps PostgreSQL.
+ExecStart=/usr/local/bin/pgvm-postgres-launch
+ExecStop=/usr/local/bin/pgvm-postgres-stop
+ExecReload=/usr/local/bin/pgvm-postgres-reload
+ExecStopPost=/usr/local/bin/pgvm-postgres-stop-post
 
-### Why
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=infinity
+TimeoutStopSec=600
 
-Spawning PostgreSQL directly from `vm-control` would place PostgreSQL in the `vm-control` cgroup, which defeats isolation.
+KillMode=mixed
+KillSignal=SIGINT
+
+OOMScoreAdjust=300
+MemoryHigh=75%
+MemoryMax=85%
+MemorySwapMax=1G
+CPUWeight=100
+IOWeight=100
+TasksMax=4096
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+PostgreSQL binaries in this environment are compiled with `--with-systemd`, so `Type=notify` is acceptable as long as the launcher ends with `exec postgres ...`.
+
+Do not use `pg_ctl start` in `ExecStart`.
 
 ---
 
-## Required code changes in `vm-control`
+## Systemd unit: pgvm-postgres-op@.service
 
-### Remove
+Use one generic op unit. Do not split critical/maintenance units for now.
 
-- remove any code that starts `supervisor.js`
-- remove any code that kills `supervisor.js`
-- remove any code that expects a supervisor socket path
-- remove any logic that treats PostgreSQL as a direct child process
-- remove any cleanup logic specific to supervisor PID files or sockets
+```ini
+[Unit]
+Description=PgMaker PostgreSQL operation %i
+After=local-fs.target network-online.target
+Wants=network-online.target
+ConditionPathExists=/run/pgvm/op.env
 
-### Replace with systemd-driven commands
+[Service]
+Type=oneshot
+User=appuser
+Group=appuser
 
-For start:
+ExecStart=/usr/local/bin/pgvm-postgres-op %i
+ExecStopPost=/usr/local/bin/pgvm-postgres-op-status %n
 
-- write `/run/pgvm/cluster.env`
-- call `systemctl start pgvm-postgres.service`
+TimeoutStartSec=infinity
 
-For stop:
+OOMScoreAdjust=-500
+MemoryMin=128M
+MemoryLow=256M
+MemoryHigh=85%
 
-- optionally write `/run/pgvm/stop.env`
-- call `systemctl stop pgvm-postgres.service`
+CPUWeight=700
+IOWeight=700
+TasksMax=512
 
-For restart:
+StandardOutput=journal
+StandardError=journal
+```
 
-- optionally write `/run/pgvm/stop.env`
-- call `systemctl restart pgvm-postgres.service`
+Rationale:
 
-For reload:
+```text
+- op service should have more priority than Postgres
+- promote/checkpoint/rewind may need to run while Postgres is busy
+- basebackup/initdb may use available VM resources
+- do not hard cap MemoryMax unless future testing proves it is needed
+- sidecars should be protected separately using a control slice
+```
 
-- call `systemctl reload pgvm-postgres.service`
+---
 
-For operations:
+## Optional systemd slice: pgvm-control.slice
 
-- write `/run/pgvm/op.env`
-- call `systemctl start pgvm-postgres-op@<operation>.service`
+Recommended for vm-control and other sidecars.
 
-### State API changes
+```ini
+[Unit]
+Description=PgMaker control-plane and sidecar slice
 
-Expose PostgreSQL state using systemd + readiness data.
+[Slice]
+MemoryMin=768M
+MemoryLow=1536M
+CPUWeight=1000
+IOWeight=1000
+```
 
-Recommended internal shape:
+If used, `vm-control.service` can include:
 
-```json
-{
-  "unit": "pgvm-postgres.service",
-  "activeState": "active",
-  "subState": "running",
-  "result": "success",
-  "mainPid": "1234",
-  "ready": "accepting",
-  "healthy": true
+```ini
+[Service]
+Slice=pgvm-control.slice
+OOMScoreAdjust=-900
+MemoryMax=512M
+MemorySwapMax=128M
+CPUWeight=1000
+IOWeight=1000
+```
+
+Only apply/override `vm-control.service` if the platform owner agrees. The sidecar may provide an optional drop-in, but must not break base vm-control startup.
+
+---
+
+## Installer requirements
+
+Implement `pgvm/install.sh` as idempotent.
+
+It must:
+
+```text
+1. verify vm-control.service exists
+2. detect whether pgvm-postgres.service is active
+3. install/update helper scripts atomically
+4. install/update unit files only when safe
+5. run systemctl daemon-reload only when needed and safe
+6. never auto-start or auto-restart PostgreSQL
+7. log clear actions
+8. exit non-zero only on real install failure
+```
+
+### Detection
+
+```bash
+has_vm_control() {
+  systemctl cat vm-control.service >/dev/null 2>&1
+}
+
+postgres_is_active() {
+  systemctl is-active --quiet pgvm-postgres.service
 }
 ```
 
-Use `/usr/local/bin/pgvm-postgres-state` if convenient.
+### Active DB upgrade behavior
+
+If Postgres is active:
+
+```text
+- install /usr/local/bin/pgvm-postgres-* scripts
+- do not replace unit files in /etc/systemd/system
+- write pending unit files to /data/local/pgvm/pending-systemd
+- do not restart DB
+```
+
+### Inactive DB behavior
+
+If Postgres is not active:
+
+```text
+- install scripts
+- install unit files
+- run systemctl daemon-reload
+- reset failed state if needed
+```
 
 ---
 
-## Supported one-shot operations and env mapping
+## Root/sudo model
 
-### `init`
+The sidecar normally runs as `appuser`. Installing under `/usr/local/bin` and `/etc/systemd/system` requires root.
 
-Supported env keys:
+Do not run the whole HTTP sidecar as root.
 
-- `PG_INIT_PGMAJOR` or `PG_INIT_PG_HOME` or `PG_INIT_BIN_DIR`
-- `PG_INIT_PGDATA`
-- `PG_INIT_USERNAME`
-- `PG_INIT_PWFILE`
-- `PG_INIT_AUTH`
-- `PG_INIT_AUTH_HOST`
-- `PG_INIT_AUTH_LOCAL`
-- `PG_INIT_ENCODING`
-- `PG_INIT_LOCALE`
-- `PG_INIT_LC_COLLATE`
-- `PG_INIT_LC_CTYPE`
-- `PG_INIT_LOCALE_PROVIDER`
-- `PG_INIT_ICU_LOCALE`
-- `PG_INIT_WALDIR`
-- `PG_INIT_WAL_SEGSIZE`
-- `PG_INIT_ALLOW_GROUP_ACCESS`
-- `PG_INIT_DATA_CHECKSUMS`
+Preferred approach:
 
-### `basebackup`
+```text
+- keep vm-control as appuser
+- use a small root-owned wrapper or restricted sudo for installer/systemctl actions
+```
 
-Supported env keys:
+Example commands that may need sudo:
 
-- `PG_BB_PGMAJOR` or `PG_BB_PG_HOME` or `PG_BB_BIN_DIR`
-- `PG_BB_SOURCE_CONNSTR`
-- `PG_BB_TARGET_DIR`
-- `PG_BB_FORMAT`
-- `PG_BB_WAL_METHOD`
-- `PG_BB_SLOT`
-- `PG_BB_CREATE_SLOT`
-- `PG_BB_MAX_RATE`
-- `PG_BB_LABEL`
-- `PG_BB_COMPRESS`
-- `PG_BB_INCREMENTAL_MANIFEST`
-- `PG_BB_WRITE_RECOVERY_CONF`
-- `PG_BB_PROGRESS`
-- `PG_BB_NO_SYNC`
+```bash
+sudo /usr/local/sbin/pgvm-apply-systemd <sidecar-release>/pgvm
+sudo systemctl start pgvm-postgres.service
+sudo systemctl stop pgvm-postgres.service
+sudo systemctl restart pgvm-postgres.service
+sudo systemctl reload pgvm-postgres.service
+sudo systemctl start pgvm-postgres-op@promote.service
+sudo systemctl show pgvm-postgres.service ...
+```
 
-### `rewind`
-
-Supported env keys:
-
-- `PG_RW_PGMAJOR` or `PG_RW_PG_HOME` or `PG_RW_BIN_DIR`
-- `PG_RW_TARGET_PGDATA`
-- one of `PG_RW_SOURCE_PGDATA` or `PG_RW_SOURCE_CONNSTR`
-- `PG_RW_WRITE_RECOVERY_CONF`
-- `PG_RW_RESTORE_TARGET_WAL`
-- `PG_RW_DRY_RUN`
-- `PG_RW_PROGRESS`
-- `PG_RW_NO_SYNC`
-- `PG_RW_NO_ENSURE_SHUTDOWN`
-- `PG_RW_CONFIG_FILE`
-
-### `checkpoint`
-
-Supported env keys:
-
-- `PG_CP_CONNSTR`
-
-### `promote`
-
-Supported env keys:
-
-- `PG_PROMOTE_WAIT`
-- `PG_PROMOTE_TIMEOUT`
+Prefer a stable root-owned wrapper over allowing mutable sidecar scripts to run directly as root.
 
 ---
 
-## Service behavior expectations
+## Script behavior requirements
 
-### PostgreSQL unit
+### pgvm-postgres-launch
 
-- must use `Type=notify`
-- must `exec postgres` directly from the launch wrapper
-- must not use `pg_ctl start` as `ExecStart`
-- must use wrapper scripts for `ExecStop` and `ExecReload`
-- must remain generic across PG 14 through 18
+Must:
 
-### Boot behavior
+```text
+- load /run/pgvm/cluster.env
+- resolve PG_HOME/PG_BIN_DIR for PG 14-18
+- export LD_LIBRARY_PATH
+- exec postgres directly
+```
 
-- do not enable `pgvm-postgres.service` to auto-start on boot blindly
-- only `vm-control.service` should auto-start
-- `vm-control` decides whether the VM already has a cluster and whether PostgreSQL should start
+Final command must look like:
 
-### Defaults
+```bash
+exec "$PG_BIN_DIR/postgres" \
+  -D "$PGDATA" \
+  -p "${PGPORT:-5432}" \
+  -c "cluster_name=${PGCLUSTER_NAME:-pgvm}" \
+  ${PGOPTS:-}
+```
 
-- default stop mode is `fast`
-- default stop timeout is `90`
-- default stop wait is `yes`
+### pgvm-postgres-stop
 
----
+Must:
 
-## Security guidance
+```text
+- load cluster.env
+- optionally load stop.env
+- default to fast / 90 seconds / wait yes
+- validate mode smart|fast|immediate
+- use pg_ctl stop
+```
 
-### Prefer bounded privilege
+### pgvm-postgres-op
 
-If `vm-control` does not run as root, use a small sudo allowlist.
+Must:
 
-Allowed patterns should be limited to:
+```text
+- read operation from %i
+- load /run/pgvm/op.env
+- validate required variables per operation
+- support init, basebackup, rewind, promote, checkpoint
+- use a lock file to prevent overlapping ops
+```
 
-- `systemctl start/stop/restart/reload/status/show pgvm-postgres.service`
-- `systemctl start/status/show pgvm-postgres-op@*.service`
+Lock example:
 
-Do not reintroduce arbitrary shell execution just because `supervisor.js` is gone.
+```bash
+LOCK_FILE=/run/pgvm/postgres-op.lock
+exec 9>"$LOCK_FILE"
+flock -n 9 || { echo "another pgvm operation is running" >&2; exit 1; }
+```
 
-### Avoid raw option pass-through
+### pgvm-postgres-state
 
-Do not add arbitrary user-supplied shell fragments into `PGOPTS` or one-shot operation env files without validation.
+Must return JSON when called with `--json`.
 
-Map only supported, named parameters.
+It should include raw systemd and pg_isready fields. Do not map states.
 
----
+Example:
 
-## Testing checklist
+```json
+{
+  "service": "pgvm-postgres.service",
+  "systemd": {
+    "LoadState": "loaded",
+    "ActiveState": "active",
+    "SubState": "running",
+    "Result": "success",
+    "MainPID": 1234,
+    "UnitFileState": "enabled"
+  },
+  "pgIsReady": {
+    "ran": true,
+    "exitCode": 0,
+    "stdout": "127.0.0.1:5432 - accepting connections",
+    "stderr": ""
+  },
+  "ts": "2026-04-30T00:00:00Z"
+}
+```
 
-### Start
-
-- write `cluster.env`
-- start service
-- verify `systemctl status pgvm-postgres.service`
-- verify `pgvm-postgres-state` returns `healthy=true`
-
-### Stop
-
-- set `PG_STOP_MODE=smart`
-- stop service
-- verify clean shutdown
-- repeat with `fast`
-- repeat with `immediate`
-
-### Restart
-
-- restart service with a custom stop mode
-- verify service returns to `active`
-
-### Basebackup
-
-- run `pgvm-postgres-op@basebackup.service`
-- verify it is not under `vm-control.service` cgroup
-
-### Rewind
-
-- run `pgvm-postgres-op@rewind.service`
-- verify logs in journald
-
-### cgroup isolation
-
-- verify `systemctl show vm-control.service -p ControlGroup`
-- verify `systemctl show pgvm-postgres.service -p ControlGroup`
-- verify they are different
-
-### Failure semantics
-
-- kill postgres main PID
-- verify systemd marks service failed or restarts it according to unit policy
-- verify `vm-control` broadcasts down/unhealthy transition
+vm-control should relay this JSON as-is.
 
 ---
 
-## Non-goals
+## Node.js sidecar integration
 
-- do not create a new replacement supervisor daemon
-- do not keep PostgreSQL as a child process of Node
-- do not move one-shot DB operations back into `vm-control` child processes
+At startup:
+
+```js
+await ensurePgvmSystemdInstalled();
+```
+
+Behavior:
+
+```text
+- if PGVM_SYSTEMD_MODE=disabled, skip install
+- if vm-control.service missing, skip install and use legacy
+- if install succeeds, systemd mode is available
+- if install fails and mode=auto, log and use legacy
+- if install fails and mode=required, fail startup/request
+```
+
+All DB lifecycle APIs should go through the adapter layer.
+
+Systemd start example:
+
+```js
+await writeFile('/run/pgvm/cluster.env', clusterEnvText);
+await execFile('/usr/bin/sudo', ['-n', '/usr/bin/systemctl', 'start', 'pgvm-postgres.service']);
+```
+
+Systemd op example:
+
+```js
+await writeFile('/run/pgvm/op.env', opEnvText);
+await execFile('/usr/bin/sudo', ['-n', '/usr/bin/systemctl', 'start', `pgvm-postgres-op@${op}.service`]);
+```
+
+State example:
+
+```js
+const state = await execFile('/usr/local/bin/pgvm-postgres-state', ['--json']);
+// relay JSON unchanged
+```
 
 ---
 
-## Summary
+## WebSocket status relay
 
-The new standard is:
+If WebSocket is enabled on port `3000`, it should relay raw state payloads.
 
-- `vm-control` is the control plane
-- systemd is the PostgreSQL process supervisor
-- PostgreSQL and one-shot DB operations each get their own systemd unit and cgroup
-- health broadcasting is implemented in `vm-control` using systemd state and readiness checks
-- `supervisor.js` is removed completely
+Do not create another state mapping in Node.
+
+Flow:
+
+```text
+poll or event trigger -> call pgvm-postgres-state --json -> broadcast JSON unchanged
+```
+
+---
+
+## Do not do
+
+Do not:
+
+```text
+- reintroduce supervisor.js as Postgres owner in systemd mode
+- spawn postgres directly from vm-control in systemd mode
+- use pg_ctl start in systemd ExecStart
+- hardcode PG version in systemd unit
+- install PgVM systemd integration if vm-control.service is absent
+- restart a running database during sidecar upgrade
+- overwrite active unit files while Postgres is active unless explicitly requested
+- duplicate state mappings in vm-control
+- persist op.env or stop.env as desired state
+```
+
+---
+
+## Test checklist
+
+### Fresh boot
+
+```bash
+systemctl status vm-control.service
+systemctl cat pgvm-postgres.service
+systemctl cat pgvm-postgres-op@.service
+```
+
+Expected:
+
+```text
+vm-control active
+pgvm units installed
+Postgres not auto-started unless requested
+```
+
+### Start DB
+
+```bash
+cat >/run/pgvm/cluster.env <<'CLUSTER_EOF'
+PGMAJOR=16
+PG_HOME=/opt/eFX/apps/evolve/postgres/16/usr/pgsql-16
+PG_BIN_DIR=/opt/eFX/apps/evolve/postgres/16/usr/pgsql-16/bin
+PGDATA=/data/local/testdb
+PGPORT=5432
+PGCLUSTER_NAME=testdb
+CLUSTER_EOF
+
+systemctl start pgvm-postgres.service
+pgvm-postgres-state --json
+```
+
+### Stop DB
+
+```bash
+cat >/run/pgvm/stop.env <<'STOP_EOF'
+PG_STOP_MODE=fast
+PG_STOP_TIMEOUT=300
+PG_STOP_WAIT=yes
+STOP_EOF
+
+systemctl stop pgvm-postgres.service
+```
+
+### Operation
+
+```bash
+cat >/run/pgvm/op.env <<'OP_EOF'
+# operation-specific values
+OP_EOF
+
+systemctl start pgvm-postgres-op@promote.service
+```
+
+### Upgrade while DB running
+
+Expected:
+
+```text
+helper scripts updated
+unit file changes deferred or safely handled
+Postgres not restarted
+state endpoint still works
+legacy fallback still available
+```
+
+---
+
+## Final principle
+
+The VM image should provide stable bootstrapping for `vm-control`.
+
+The sidecar release should own evolving PostgreSQL lifecycle tooling.
+
+This gives PgMaker:
+
+```text
+- fewer VM image rebuilds
+- faster script changes through Nexus sidecar upgrades
+- clean migration from legacy supervisor.js to systemd
+- safe behavior during fresh boot and sidecar upgrade
+- support for PG 14 through PG 18
+```
