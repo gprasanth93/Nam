@@ -1,1028 +1,1250 @@
-Here is the clean pattern I would use in your Firecracker VMs:
+# PgMaker Host Agent — Rust Implementation Guide
 
-Use **one long-running generic systemd service for the PostgreSQL server itself**, and **one generic oneshot operation unit** for admin actions such as `initdb`, `basebackup`, `rewind`, `checkpoint`, and `promote`. Keep the server lifecycle in the main unit, and keep operational jobs separate so they get their own logs, timeouts, and cgroup boundaries. Also, use `postgres` itself as the main process under systemd, and use `pg_ctl` only for stop/reload-style control actions. `ExecStop=` is the right place for clean shutdown logic, and systemd runs `ExecStop=` on both stop and restart. `MemoryLow`/`MemoryMin` are protection settings, `MemoryHigh` is the main throttling control, and `MemoryMax` is the last line of defense; these memory controls require the unified cgroup hierarchy. ([man7.org][1])
+This file is intended to be passed directly into Copilot / ChatGPT inside the office laptop as the build specification for a lightweight Rust host-metrics agent.
 
-## 1) Runtime files
+## 1. Goal
 
-Have `vm-control` write three runtime files.
+Build a lightweight, low-latency Rust agent that runs on RHEL 8 Linux servers and exposes categorized host metrics through HTTP endpoints and gRPC streaming.
 
-`/run/pgvm/cluster.env`
+The agent must collect:
 
-```bash
-PGMAJOR=16
-PG_BIN_DIR=/usr/pgsql-16/bin
-PGDATA=/data/local/mydb/16/data
-PGPORT=5432
-PGCLUSTER_NAME=mydb
-PGOPTS=
+- CPU static details and live usage
+- Memory static details and live usage
+- Swap usage
+- Disk inventory, disk type, vendor, model, serial, mountpoints, filesystem, size
+- Disk IO rates
+- Mounts and filesystem usage
+- LVM layout where available
+- Top processes by CPU, memory, and IO
+- OS, kernel, hostname, uptime, and basic hardware identity
+- Agent health, collection status, command errors, and cache age
+
+The service must be small, fast, stable under high server load, and safe to run without sudo.
+
+Target environment from observed server screenshots:
+
+- Red Hat Enterprise Linux 8.10
+- Kernel around 4.18
+- Large bare-metal class server, example: 128 logical CPUs, around 1 TB RAM
+- DELL/RAID/SAS/NVMe-like devices visible through `lsblk` and `lshw`
+- `nvme` CLI may not be installed; do not depend on it
+- `top` is installed
+- User may not have sudo access
+- No new Linux packages should be required
+
+## 2. Hard constraints
+
+1. Use Rust.
+2. Do not require sudo.
+3. Do not require installing OS packages.
+4. Do not require `nvme`, `iostat`, `sar`, `dmidecode`, `smartctl`, or any external plugin.
+5. The agent must run on a fixed HTTP port.
+6. The agent must expose a health endpoint.
+7. Default endpoint response format must be JSON.
+8. Plain text output must also be supported using `?format=text` or `Accept: text/plain`.
+9. The code must be modular: every metric area must live in its own file/module.
+10. Commands must be centralized in command modules so adding a new command later is easy.
+11. Expensive commands must not run on every request unless explicitly requested.
+12. Use caching with TTLs.
+13. Use timeouts for every command.
+14. Use bounded memory only.
+15. Use Tokio multi-thread runtime so the agent can use multiple CPU cores safely.
+16. No unbounded queues.
+17. No full-process-table streaming every second.
+18. gRPC must support dynamic sampling frequency changes from the aggregator.
+19. The Node.js `host-profile` aggregator must be able to consume the agent easily.
+20. The agent must degrade gracefully when a command or file is unavailable.
+
+## 3. Recommended service name
+
+Use:
+
+```text
+pgmaker-host-agent
 ```
 
-`/run/pgvm/stop.env`
+Default ports:
 
-```bash
-PG_STOP_MODE=fast
-PG_STOP_TIMEOUT=90
+```text
+HTTP API: 19091
+Grpc API: 19092
 ```
 
-`/run/pgvm/op.env`
+Keep these as config values, but default them to fixed ports.
 
-```bash
-# written per operation; examples shown later
+## 4. High-level architecture
+
+```text
++-----------------------------+
+| pgmaker-host-agent          |
+| Rust / Tokio multi-thread   |
++-----------------------------+
+| HTTP API                    |
+| /healthz                    |
+| /readyz                     |
+| /v1/cpu                     |
+| /v1/memory                  |
+| /v1/disk                    |
+| /v1/io                      |
+| /v1/lvm                     |
+| /v1/mounts                  |
+| /v1/top                     |
+| /v1/swap                    |
+| /v1/static                  |
+| /v1/snapshot                |
++-----------------------------+
+| gRPC API                    |
+| StreamMetrics               |
+| SetSamplingConfig           |
+| GetSnapshot                 |
++-----------------------------+
+| Collectors                  |
+| /proc parser                |
+| /sys parser                 |
+| safe command runner         |
+| cache manager               |
++-----------------------------+
 ```
 
-`cluster.env` is the authoritative runtime state for the currently mounted cluster. `stop.env` is only for dynamic stop behavior. `op.env` is for one-off admin jobs.
+The HTTP API is for direct debugging, JSON collection, and easy Node.js integration.
 
-## 2) Main PostgreSQL systemd service
+The gRPC API is for persistent streaming and dynamic sampling changes.
 
-Create `/etc/systemd/system/pgvm-postgres.service`:
+The agent should maintain the latest snapshot in memory. HTTP requests should normally return cached/latest data quickly rather than running expensive commands every time.
+
+## 5. Project structure
+
+Create the project with this structure:
+
+```text
+pgmaker-host-agent/
+  Cargo.toml
+  README.md
+  config.example.toml
+  proto/
+    hostagent.proto
+  src/
+    main.rs
+    app.rs
+    config.rs
+    error.rs
+    state.rs
+    model/
+      mod.rs
+      common.rs
+      cpu.rs
+      memory.rs
+      disk.rs
+      io.rs
+      lvm.rs
+      mounts.rs
+      process.rs
+      os.rs
+      snapshot.rs
+      health.rs
+    collectors/
+      mod.rs
+      cpu.rs
+      memory.rs
+      swap.rs
+      disk.rs
+      io.rs
+      lvm.rs
+      mounts.rs
+      process.rs
+      os.rs
+      static_info.rs
+      snapshot.rs
+    commands/
+      mod.rs
+      runner.rs
+      catalog.rs
+      lsblk.rs
+      lscpu.rs
+      free.rs
+      top.rs
+      lvm.rs
+      lshw.rs
+      hostnamectl.rs
+      uname.rs
+      df.rs
+      findmnt.rs
+    procfs/
+      mod.rs
+      stat.rs
+      meminfo.rs
+      diskstats.rs
+      mountinfo.rs
+      loadavg.rs
+      uptime.rs
+      pressure.rs
+      process.rs
+    sysfs/
+      mod.rs
+      block.rs
+      dmi.rs
+      cpu.rs
+    http/
+      mod.rs
+      routes.rs
+      response.rs
+      text.rs
+    grpc/
+      mod.rs
+      service.rs
+      mapper.rs
+    scheduler/
+      mod.rs
+      sampling.rs
+      workers.rs
+    util/
+      mod.rs
+      bytes.rs
+      time.rs
+      hostname.rs
+      rate.rs
+      json.rs
+```
+
+The important design is that commands and collectors are separate:
+
+- `commands/*` knows how to execute and parse external commands.
+- `procfs/*` and `sysfs/*` read Linux files directly.
+- `collectors/*` decides which source to use and how to merge fallback data.
+- `http/*` only serves already collected data.
+- `grpc/*` streams snapshots and accepts sampling config changes.
+
+## 6. Rust dependencies
+
+Use a small dependency set:
+
+```toml
+[package]
+name = "pgmaker-host-agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "time", "sync", "signal"] }
+axum = "0.7"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
+hostname = "0.4"
+bytesize = "1"
+
+# gRPC
+prost = "0.13"
+tonic = { version = "0.12", features = ["transport"] }
+tokio-stream = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
+```
+
+Keep versions flexible unless the company has an internal crate mirror with pinned versions.
+
+## 7. Runtime configuration
+
+Create `config.example.toml`:
+
+```toml
+[server]
+http_bind = "0.0.0.0:19091"
+grpc_bind = "0.0.0.0:19092"
+request_timeout_ms = 3000
+command_timeout_ms = 2500
+max_command_concurrency = 4
+
+[agent]
+site = "uat"
+region = "unknown"
+datacenter = "unknown"
+environment = "uat"
+role = "baremetal"
+
+[cache]
+static_ttl_seconds = 3600
+cpu_ttl_seconds = 5
+memory_ttl_seconds = 5
+swap_ttl_seconds = 10
+disk_ttl_seconds = 60
+io_ttl_seconds = 5
+mounts_ttl_seconds = 60
+lvm_ttl_seconds = 300
+top_ttl_seconds = 15
+snapshot_ttl_seconds = 5
+
+[sampling.normal]
+heartbeat_seconds = 5
+cpu_seconds = 10
+memory_seconds = 10
+swap_seconds = 30
+io_seconds = 10
+mounts_seconds = 60
+disk_seconds = 300
+lvm_seconds = 300
+top_seconds = 30
+
+[sampling.pressure]
+heartbeat_seconds = 2
+cpu_seconds = 2
+memory_seconds = 2
+swap_seconds = 10
+io_seconds = 2
+mounts_seconds = 30
+disk_seconds = 120
+lvm_seconds = 300
+top_seconds = 5
+
+[limits]
+top_process_count = 25
+max_process_scan = 10000
+max_response_bytes = 5242880
+ring_buffer_samples = 120
+
+[features]
+enable_lshw = true
+enable_lvm_commands = true
+enable_top_command = true
+enable_pressure_stall = true
+```
+
+The agent must also support environment variable overrides:
+
+```text
+PGMAKER_AGENT_HTTP_BIND=0.0.0.0:19091
+PGMAKER_AGENT_GRPC_BIND=0.0.0.0:19092
+PGMAKER_AGENT_CONFIG=/etc/pgmaker-host-agent/config.toml
+RUST_LOG=info
+```
+
+## 8. Collection strategy
+
+### 8.1 Static information
+
+Static data should be collected at startup and then refreshed rarely.
+
+Static endpoint:
+
+```text
+GET /v1/static
+GET /v1/static/os
+GET /v1/static/cpu
+GET /v1/static/memory
+GET /v1/static/disk
+GET /v1/static/hardware
+```
+
+Static data sources:
+
+| Data | Primary source | Fallback |
+|---|---|---|
+| OS | `/etc/os-release` | `hostnamectl` |
+| Kernel | `uname -a` | `/proc/version` |
+| Hostname | `hostname` crate / `/etc/hostname` | `hostnamectl` |
+| CPU | `/proc/cpuinfo`, `lscpu` | `/sys/devices/system/cpu` |
+| Memory total | `/proc/meminfo` | `free -b` |
+| DMI vendor/model | `/sys/class/dmi/id/*` | `hostnamectl`, `lshw` warning allowed |
+| Disk inventory | `lsblk -J -b -O` or selected columns | `/sys/block` |
+| Disk vendor/model/serial | `/sys/block/*/device/*`, `lsblk` | `lshw -class disk -class storage -json` |
+| LVM layout | `lvs/vgs/pvs --reportformat json` | `lsblk` tree |
+
+Do not use `dmidecode` because it usually requires sudo.
+
+Do not require `nvme`. If `/sys/class/nvme` exists, read it directly. If not, report `nvme_cli_available: false`.
+
+### 8.2 Live information
+
+Live data should use `/proc` and `/sys` first.
+
+| Data | Source |
+|---|---|
+| CPU usage | two reads of `/proc/stat`, compute deltas |
+| Load average | `/proc/loadavg` |
+| Memory | `/proc/meminfo` |
+| Swap | `/proc/meminfo` |
+| Disk IO | `/proc/diskstats`, compute rate deltas |
+| Mounts | `/proc/self/mountinfo`, `statvfs` if implemented, or `df -P -B1` |
+| Top process CPU | `/proc/[pid]/stat` deltas |
+| Process memory | `/proc/[pid]/status` or `/proc/[pid]/statm` |
+| Process IO | `/proc/[pid]/io`, may be permission-limited |
+| Pressure | `/proc/pressure/cpu`, `/proc/pressure/memory`, `/proc/pressure/io` if available |
+
+Use `top -b -n1 -w512` only as an optional fallback or raw endpoint. Do not parse `top` as the primary process collector if `/proc` parsing is available.
+
+## 9. Command catalog
+
+Implement command definitions in `src/commands/catalog.rs`.
+
+Each command must define:
+
+```rust
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub program: &'static str,
+    pub args: &'static [&'static str],
+    pub timeout_ms: u64,
+    pub required: bool,
+    pub cache_ttl_seconds: u64,
+}
+```
+
+Example command catalog:
+
+```rust
+pub const LSBLOCK_JSON: CommandSpec = CommandSpec {
+    name: "lsblk_json",
+    program: "lsblk",
+    args: &["-J", "-b", "-o", "NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,VENDOR,MODEL,SERIAL,ROTA,TRAN"],
+    timeout_ms: 2500,
+    required: false,
+    cache_ttl_seconds: 60,
+};
+
+pub const LSCPU: CommandSpec = CommandSpec {
+    name: "lscpu",
+    program: "lscpu",
+    args: &[],
+    timeout_ms: 1500,
+    required: false,
+    cache_ttl_seconds: 3600,
+};
+
+pub const TOP_BATCH: CommandSpec = CommandSpec {
+    name: "top_batch",
+    program: "top",
+    args: &["-b", "-n", "1", "-w", "512"],
+    timeout_ms: 2500,
+    required: false,
+    cache_ttl_seconds: 15,
+};
+
+pub const LSHW_STORAGE_JSON: CommandSpec = CommandSpec {
+    name: "lshw_storage_json",
+    program: "lshw",
+    args: &["-class", "disk", "-class", "storage", "-json"],
+    timeout_ms: 5000,
+    required: false,
+    cache_ttl_seconds: 3600,
+};
+```
+
+Important: command failures must not fail the whole endpoint. Return partial data and include command errors in a `warnings` array.
+
+## 10. Command runner requirements
+
+Implement `src/commands/runner.rs`.
+
+Requirements:
+
+1. Use `tokio::process::Command`.
+2. Apply timeout with `tokio::time::timeout`.
+3. Limit command concurrency using `tokio::sync::Semaphore`.
+4. Capture stdout and stderr.
+5. Return structured result:
+
+```rust
+pub struct CommandOutput {
+    pub name: String,
+    pub program: String,
+    pub args: Vec<String>,
+    pub exit_code: Option<i32>,
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub duration_ms: u64,
+    pub timed_out: bool,
+}
+```
+
+6. If the command does not exist, return `success=false` and `error_kind="not_found"`.
+7. Never panic on command failure.
+
+## 11. HTTP endpoints
+
+All endpoints must default to JSON.
+
+Plain text support:
+
+```text
+GET /v1/cpu?format=text
+Accept: text/plain
+```
+
+### 11.1 Health endpoints
+
+```text
+GET /healthz
+GET /readyz
+GET /livez
+```
+
+`/healthz` response:
+
+```json
+{
+  "status": "ok",
+  "agent": "pgmaker-host-agent",
+  "version": "0.1.0",
+  "hostname": "gbx25135972",
+  "uptime_seconds": 12345,
+  "http_port": 19091,
+  "grpc_port": 19092,
+  "last_snapshot_age_ms": 780,
+  "degraded": false,
+  "warnings": []
+}
+```
+
+### 11.2 Static endpoints
+
+```text
+GET /v1/static
+GET /v1/static/os
+GET /v1/static/cpu
+GET /v1/static/memory
+GET /v1/static/disk
+GET /v1/static/hardware
+```
+
+### 11.3 Live metric endpoints
+
+```text
+GET /v1/cpu
+GET /v1/memory
+GET /v1/swap
+GET /v1/disk
+GET /v1/io
+GET /v1/mounts
+GET /v1/lvm
+GET /v1/top
+GET /v1/processes/top
+GET /v1/pressure
+GET /v1/snapshot
+```
+
+### 11.4 Debug endpoints
+
+Debug endpoints should be localhost-only by default:
+
+```text
+GET  /v1/debug/commands
+GET  /v1/debug/cache
+POST /v1/debug/refresh
+POST /v1/debug/sampling
+```
+
+`POST /v1/debug/sampling` body:
+
+```json
+{
+  "profile": "pressure",
+  "ttl_seconds": 300,
+  "cpu_seconds": 2,
+  "memory_seconds": 2,
+  "io_seconds": 2,
+  "top_seconds": 5
+}
+```
+
+## 12. Response envelope
+
+Every JSON endpoint should follow this envelope:
+
+```json
+{
+  "agent": {
+    "name": "pgmaker-host-agent",
+    "version": "0.1.0",
+    "hostname": "gbx25135972",
+    "collected_at": "2026-05-26T21:00:00Z",
+    "cache_age_ms": 500
+  },
+  "status": "ok",
+  "data": {},
+  "warnings": [],
+  "errors": []
+}
+```
+
+For partial data:
+
+```json
+{
+  "status": "partial",
+  "data": {},
+  "warnings": [
+    {
+      "source": "lshw",
+      "message": "lshw returned warning: output may be incomplete without super-user"
+    },
+    {
+      "source": "nvme",
+      "message": "nvme command not found; skipped"
+    }
+  ],
+  "errors": []
+}
+```
+
+## 13. Data model examples
+
+### 13.1 CPU
+
+```json
+{
+  "cpu": {
+    "architecture": "x86_64",
+    "logical_cpus": 128,
+    "sockets": 2,
+    "cores_per_socket": 32,
+    "threads_per_core": 2,
+    "model_name": "Intel(R) Xeon(R) Gold 6448Y",
+    "mhz": 1094.662,
+    "usage_pct": 34.2,
+    "iowait_pct": 2.1,
+    "steal_pct": 0.0,
+    "load_avg": {
+      "one": 5.2,
+      "five": 4.8,
+      "fifteen": 4.1,
+      "per_core_one": 0.04
+    },
+    "per_cpu": []
+  }
+}
+```
+
+### 13.2 Memory
+
+```json
+{
+  "memory": {
+    "total_bytes": 1099511627776,
+    "available_bytes": 379031240704,
+    "used_bytes": 709521145856,
+    "used_pct": 64.5,
+    "available_pct": 34.5,
+    "buffers_cache_bytes": 322122547200,
+    "hugepages": {},
+    "numa_nodes": []
+  }
+}
+```
+
+### 13.3 Disk inventory
+
+```json
+{
+  "disks": [
+    {
+      "name": "sda",
+      "type": "disk",
+      "size_bytes": 7600877920256,
+      "vendor": "DELL",
+      "model": "RAID",
+      "serial": "...",
+      "rotational": false,
+      "transport": null,
+      "class": "RAID/SAS/SATA/NVMe/Virtual/Unknown",
+      "children": [
+        {
+          "name": "sda1",
+          "type": "part",
+          "size_bytes": 7600844365824,
+          "fstype": "xfs",
+          "mountpoint": "/data/btrfs"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Disk classification rule:
+
+```text
+if tran == "nvme" or name starts with nvme -> NVMe SSD
+else if rota == false and tran in ["sata", "sas"] -> SATA/SAS SSD
+else if rota == true -> HDD
+else if model/vendor contains RAID -> RAID Logical Disk
+else if type == lvm -> LVM Logical Volume
+else Unknown
+```
+
+Do not blindly mark RAID as HDD or SSD unless rotation/transport/sysfs gives enough signal.
+
+### 13.4 IO
+
+```json
+{
+  "io": {
+    "sample_window_ms": 5000,
+    "devices": [
+      {
+        "name": "sda",
+        "read_bytes_per_sec": 1048576,
+        "write_bytes_per_sec": 5242880,
+        "read_iops": 120,
+        "write_iops": 350,
+        "await_ms_estimate": 3.2,
+        "util_pct_estimate": 40.1
+      }
+    ],
+    "total_read_bytes_per_sec": 1048576,
+    "total_write_bytes_per_sec": 5242880
+  }
+}
+```
+
+### 13.5 Top processes
+
+```json
+{
+  "top": {
+    "sample_window_ms": 5000,
+    "top_by_cpu": [
+      {
+        "pid": 1234,
+        "user": "postgres",
+        "command": "postgres",
+        "cmdline": "postgres: db writer",
+        "cpu_pct": 180.4,
+        "rss_bytes": 4294967296,
+        "read_bytes_per_sec": 1000000,
+        "write_bytes_per_sec": 4000000,
+        "state": "R"
+      }
+    ],
+    "top_by_memory": [],
+    "top_by_io": []
+  }
+}
+```
+
+For multi-core systems, process CPU can exceed 100%. On a 128-thread host, one process using two full CPUs may show around 200%.
+
+## 14. Full snapshot endpoint
+
+`GET /v1/snapshot` must return one merged object suitable for Node.js `host-profile` ingestion.
+
+```json
+{
+  "host": "gbx25135972",
+  "collected_at": "2026-05-26T21:00:00Z",
+  "agent_version": "0.1.0",
+  "status": "ok",
+  "static": {},
+  "cpu": {},
+  "memory": {},
+  "swap": {},
+  "disk": {},
+  "io": {},
+  "mounts": {},
+  "lvm": {},
+  "top": {},
+  "pressure": {},
+  "health": {},
+  "warnings": []
+}
+```
+
+This endpoint is the easiest first integration point for the existing Node.js `host-profile` service.
+
+## 15. gRPC API
+
+Create `proto/hostagent.proto`:
+
+```proto
+syntax = "proto3";
+
+package pgmaker.hostagent.v1;
+
+service HostAgentService {
+  rpc StreamMetrics(stream AgentControl) returns (stream MetricEnvelope);
+  rpc SetSamplingConfig(SamplingConfig) returns (SamplingAck);
+  rpc GetSnapshot(SnapshotRequest) returns (MetricEnvelope);
+  rpc GetHealth(HealthRequest) returns (MetricEnvelope);
+}
+
+message AgentControl {
+  string request_id = 1;
+  oneof command {
+    SamplingConfig sampling_config = 2;
+    SnapshotRequest snapshot_request = 3;
+    RefreshRequest refresh_request = 4;
+    Ping ping = 5;
+  }
+}
+
+message SamplingConfig {
+  string profile = 1; // normal, pressure, incident, custom
+  uint32 ttl_seconds = 2;
+  uint32 heartbeat_seconds = 3;
+  uint32 cpu_seconds = 4;
+  uint32 memory_seconds = 5;
+  uint32 swap_seconds = 6;
+  uint32 io_seconds = 7;
+  uint32 mounts_seconds = 8;
+  uint32 disk_seconds = 9;
+  uint32 lvm_seconds = 10;
+  uint32 top_seconds = 11;
+  uint32 top_process_count = 12;
+}
+
+message SnapshotRequest {
+  bool include_static = 1;
+  bool include_top = 2;
+  bool force_refresh = 3;
+}
+
+message RefreshRequest {
+  repeated string categories = 1; // cpu, memory, swap, disk, io, mounts, lvm, top, static
+}
+
+message Ping {
+  string message = 1;
+}
+
+message SamplingAck {
+  string status = 1;
+  string active_profile = 2;
+  string message = 3;
+}
+
+message HealthRequest {}
+
+message MetricEnvelope {
+  string host = 1;
+  string agent_version = 2;
+  string collected_at = 3;
+  string category = 4; // snapshot, cpu, memory, io, top, health, etc.
+  string json = 5;     // JSON payload for easy Node.js ingestion
+  repeated string warnings = 6;
+}
+```
+
+Important: use `json` as a string inside the protobuf envelope initially. This keeps Node.js integration simple and avoids recreating every nested structure twice. Later, we can replace JSON string with strongly typed protobuf messages.
+
+## 16. gRPC dynamic sampling behavior
+
+The aggregator must be able to send this over the stream:
+
+```json
+{
+  "profile": "pressure",
+  "ttl_seconds": 300,
+  "cpu_seconds": 2,
+  "memory_seconds": 2,
+  "io_seconds": 2,
+  "top_seconds": 5,
+  "top_process_count": 50
+}
+```
+
+Expected behavior:
+
+1. Agent updates active sampling config in memory.
+2. Agent immediately refreshes selected categories.
+3. Agent sends an ack.
+4. Agent keeps pressure sampling for `ttl_seconds`.
+5. After TTL expires, agent returns to normal profile unless a newer config exists.
+
+Also support permanent profile change through HTTP debug endpoint.
+
+## 17. Scheduler design
+
+Implement a background scheduler that updates cached data.
+
+```text
+normal profile:
+  CPU every 10s
+  Memory every 10s
+  IO every 10s
+  Top every 30s
+  Mounts every 60s
+  Disk every 300s
+  LVM every 300s
+  Static every 3600s
+
+pressure profile:
+  CPU every 2s
+  Memory every 2s
+  IO every 2s
+  Top every 5s
+```
+
+Use independent category workers, not one big loop.
+
+Each worker:
+
+1. Waits for interval.
+2. Collects metric.
+3. Updates shared state.
+4. Records collection duration and errors.
+5. Sleeps again.
+
+Use `tokio::select!` so workers can react to config changes.
+
+## 18. Shared state design
+
+Create `src/state.rs`:
+
+```rust
+pub struct AgentState {
+    pub config: Arc<RwLock<AppConfig>>,
+    pub sampling: Arc<RwLock<SamplingState>>,
+    pub static_info: Arc<RwLock<Cached<StaticInfo>>>,
+    pub cpu: Arc<RwLock<Cached<CpuMetrics>>>,
+    pub memory: Arc<RwLock<Cached<MemoryMetrics>>>,
+    pub swap: Arc<RwLock<Cached<SwapMetrics>>>,
+    pub disk: Arc<RwLock<Cached<DiskInventory>>>,
+    pub io: Arc<RwLock<Cached<IoMetrics>>>,
+    pub mounts: Arc<RwLock<Cached<MountMetrics>>>,
+    pub lvm: Arc<RwLock<Cached<LvmMetrics>>>,
+    pub top: Arc<RwLock<Cached<TopProcesses>>>,
+    pub health: Arc<RwLock<AgentHealth>>,
+}
+```
+
+`Cached<T>` should include:
+
+```rust
+pub struct Cached<T> {
+    pub value: Option<T>,
+    pub collected_at: Option<DateTime<Utc>>,
+    pub duration_ms: u64,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+}
+```
+
+## 19. Memory safety and OOM prevention
+
+Rules:
+
+1. Do not store unlimited historical data in memory.
+2. Keep only latest snapshot plus small ring buffer.
+3. Limit process records to `max_process_scan` and response top-N.
+4. Truncate huge command output if needed.
+5. Reject or truncate responses bigger than `max_response_bytes`.
+6. Never queue unlimited gRPC messages.
+7. If aggregator is slow, drop older live samples and keep latest.
+8. Always prioritize heartbeat and health over large process payloads.
+
+This is critical because the agent is most valuable when the host is already overloaded.
+
+## 20. HTTP route behavior
+
+Example routes with Axum:
+
+```text
+GET /v1/cpu              -> latest cached CPU, refresh if stale and cheap
+GET /v1/cpu?refresh=true -> force refresh, subject to timeout
+GET /v1/top              -> latest cached top-N process data
+GET /v1/top/raw          -> optional raw `top -b -n 1` output
+GET /v1/disk             -> cached disk inventory
+GET /v1/io               -> latest IO rate snapshot
+GET /v1/snapshot         -> latest merged host snapshot
+```
+
+Expensive refreshes should require either:
+
+```text
+?refresh=true
+```
+
+or the scheduler should refresh them in background.
+
+## 21. Plain text output
+
+For every endpoint, support text output.
+
+Example:
+
+```text
+GET /v1/cpu?format=text
+```
+
+Output:
+
+```text
+host=gbx25135972
+collected_at=2026-05-26T21:00:00Z
+logical_cpus=128
+usage_pct=34.2
+iowait_pct=2.1
+load_1m=5.2
+load_per_core_1m=0.04
+```
+
+This helps with quick SSH/curl troubleshooting.
+
+## 22. Node.js host-profile integration
+
+For the first version, integrate Node.js with HTTP snapshot:
+
+```text
+GET http://<host>:19091/v1/snapshot
+```
+
+The Node.js `host-profile` service can store this as latest host image and optionally write timestamped JSON files similar to existing RESOURCE snapshots:
+
+```text
+TOP_20260526T210000.json
+SAR_CPU_20260526T210000.json
+SWAP_20260526T210000.json
+IOSTAT_20260526T210000.json
+DF_20260526T210000.json
+HOSTINFO_20260526T210000.json
+```
+
+Later, switch the Node.js aggregator to gRPC streaming using `@grpc/grpc-js`.
+
+Expected Node behavior:
+
+1. Open one persistent gRPC stream per host.
+2. Receive `MetricEnvelope` messages.
+3. Parse `json` field.
+4. Update in-memory host state.
+5. Write downsampled history to TimescaleDB or JSON files.
+6. Send `SamplingConfig` to temporarily increase frequency during pressure.
+
+## 23. Pressure mode logic
+
+Agent should auto-enter pressure mode locally when:
+
+```text
+CPU usage > 85%
+OR iowait > 15%
+OR memory available < 10%
+OR swap in/out is high
+OR IO pressure is high
+OR load per core > 1.5
+```
+
+But aggregator must also be able to override sampling through gRPC.
+
+Pressure mode should collect top processes more frequently.
+
+## 24. Permissions and no-sudo behavior
+
+The agent must work as a normal user.
+
+Expected limitations without sudo:
+
+| Feature | Behavior without sudo |
+|---|---|
+| dmidecode | Do not use |
+| lshw | May return partial data and warning |
+| process IO for other users | Some `/proc/[pid]/io` reads may fail; skip and warn |
+| serial numbers | May be unavailable; return null |
+| SMART data | Not available; do not collect |
+| NVMe CLI | Not installed; do not require |
+| LVM commands | May or may not be installed/readable; fallback to lsblk |
+
+Do not treat these as fatal errors.
+
+## 25. Disk and storage notes from observed server
+
+Screenshots show:
+
+- `lsblk` gives useful block tree information.
+- Some disks appear as DELL RAID logical devices.
+- LVM logical volumes are heavily used.
+- Mountpoints like `/data/local`, `/data/local1`, `/data/local2`, `/data/btrfs` appear.
+- `nvme` command is not installed, but `lshw` can still show an NVMe device.
+- `lshw` warns that output may be incomplete without super-user.
+
+Therefore:
+
+1. Use `lsblk` as the main disk inventory source.
+2. Use `/sys/block` to enrich with rotational, queue, vendor, model, serial if available.
+3. Use `lshw` only as optional enrichment.
+4. Never fail the disk endpoint because `nvme` is missing.
+
+## 26. Multi-core support
+
+Use Tokio multi-thread runtime in `main.rs`:
+
+```rust
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> anyhow::Result<()> {
+    pgmaker_host_agent::app::run().await
+}
+```
+
+Do not create one OS process per collector. Use async tasks and a bounded blocking pool for command execution.
+
+For CPU calculations:
+
+- Support large CPU counts like 128 logical CPUs.
+- Process CPU can be above 100%.
+- Provide both host CPU percentage and per-process CPU percentage.
+- Provide load per core.
+
+## 27. Error handling
+
+Create `src/error.rs` with a custom error type.
+
+Requirements:
+
+1. Endpoint errors must return JSON.
+2. Partial data should return HTTP 200 with `status=partial`.
+3. Agent internal failure should return HTTP 500 only when no useful data can be returned.
+4. Missing optional command should be warning, not error.
+5. Permission denied should be warning unless the endpoint specifically requires that data.
+
+## 28. Logging
+
+Use structured logs through `tracing`.
+
+Default log format should be text locally. Allow JSON logs through config/env.
+
+Log these events:
+
+- Agent startup
+- Config loaded
+- HTTP server bind
+- gRPC server bind
+- Collector success/failure
+- Command timeout
+- Command missing
+- Sampling profile change
+- gRPC stream connected/disconnected
+- Slow collection warning
+
+Do not log huge command outputs.
+
+## 29. Build commands
+
+Expected local commands:
+
+```bash
+cargo fmt
+cargo clippy --all-targets --all-features
+cargo build --release
+./target/release/pgmaker-host-agent --config ./config.example.toml
+```
+
+Test manually:
+
+```bash
+curl http://localhost:19091/healthz
+curl http://localhost:19091/v1/static | jq .
+curl http://localhost:19091/v1/cpu | jq .
+curl http://localhost:19091/v1/memory | jq .
+curl http://localhost:19091/v1/disk | jq .
+curl http://localhost:19091/v1/io | jq .
+curl http://localhost:19091/v1/top | jq .
+curl 'http://localhost:19091/v1/cpu?format=text'
+```
+
+If `jq` is not installed, plain curl should still show valid JSON.
+
+## 30. Optional systemd service
+
+User may not have sudo, so the agent must run manually. But include this for platform teams later.
 
 ```ini
 [Unit]
-Description=Generic PostgreSQL Server
-After=local-fs.target network.target
-Wants=local-fs.target
+Description=PgMaker Host Agent
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=appuser
-Group=appuser
-
-ExecStart=/usr/local/bin/pgvm-postgres-launch
-ExecStop=/usr/local/bin/pgvm-postgres-stop
-ExecReload=/usr/local/bin/pgvm-postgres-reload
-ExecStopPost=/usr/local/bin/pgvm-postgres-stop-post
-
-Restart=on-failure
-RestartSec=5
-
-TimeoutStopSec=600
-
-OOMScoreAdjust=300
-MemoryHigh=75%
-MemoryMax=85%
-CPUWeight=100
-
-StandardOutput=journal
-StandardError=journal
+User=pgmaker-agent
+Group=pgmaker-agent
+ExecStart=/opt/pgmaker-host-agent/pgmaker-host-agent --config /etc/pgmaker-host-agent/config.toml
+Restart=always
+RestartSec=3
+WatchdogSec=30
+OOMScoreAdjust=-700
+MemoryAccounting=yes
+MemoryMax=128M
+MemoryHigh=96M
+CPUAccounting=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pgmaker-host-agent /var/log/pgmaker-host-agent
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-This keeps PostgreSQL in its own service/cgroup, gives it bounded resource behavior, and makes stop/restart/reload go through your own wrappers. Since `ExecStop=` is part of restart handling too, your dynamic stop wrapper is honored during restart as well. Keep `TimeoutStopSec` larger than the maximum `pg_ctl -t` value you plan to allow. ([man7.org][1])
-
-## 3) Operation unit for non-daemon tasks
-
-Create `/etc/systemd/system/pgvm-postgres-op@.service`:
-
-```ini
-[Unit]
-Description=PostgreSQL operation %i
-After=local-fs.target network.target
-Wants=local-fs.target
-
-[Service]
-Type=oneshot
-User=appuser
-Group=appuser
-ExecStart=/usr/local/bin/pgvm-postgres-op %i
-TimeoutStartSec=infinity
-StandardOutput=journal
-StandardError=journal
-```
-
-Then `vm-control` can run:
-
-```bash
-systemctl start pgvm-postgres-op@init.service
-systemctl start pgvm-postgres-op@basebackup.service
-systemctl start pgvm-postgres-op@rewind.service
-systemctl start pgvm-postgres-op@checkpoint.service
-systemctl start pgvm-postgres-op@promote.service
-```
-
-That keeps heavy or disruptive jobs out of the main Postgres daemon unit.
-
-## 4) Main wrapper scripts
-
-### `/usr/local/bin/pgvm-postgres-launch`
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-source /run/pgvm/cluster.env
-
-: "${PGDATA:?PGDATA is required}"
-
-if [[ -z "${PG_BIN_DIR:-}" ]]; then
-  : "${PGMAJOR:?PGMAJOR is required when PG_BIN_DIR is not set}"
-  PG_BIN_DIR="/usr/pgsql-${PGMAJOR}/bin"
-fi
-
-exec "${PG_BIN_DIR}/postgres" \
-  -D "${PGDATA}" \
-  -p "${PGPORT:-5432}" \
-  -c "cluster_name=${PGCLUSTER_NAME:-pgvm}" \
-  ${PGOPTS:-}
-```
-
-### `/usr/local/bin/pgvm-postgres-stop`
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-source /run/pgvm/cluster.env
-
-if [[ -z "${PG_BIN_DIR:-}" ]]; then
-  : "${PGMAJOR:?PGMAJOR is required when PG_BIN_DIR is not set}"
-  PG_BIN_DIR="/usr/pgsql-${PGMAJOR}/bin"
-fi
-
-MODE="fast"
-TIMEOUT="90"
-
-if [[ -f /run/pgvm/stop.env ]]; then
-  # shellcheck disable=SC1091
-  source /run/pgvm/stop.env
-  MODE="${PG_STOP_MODE:-fast}"
-  TIMEOUT="${PG_STOP_TIMEOUT:-90}"
-fi
-
-case "$MODE" in
-  smart|fast|immediate) ;;
-  *)
-    echo "invalid PG_STOP_MODE: $MODE" >&2
-    exit 1
-    ;;
-esac
-
-case "$TIMEOUT" in
-  ''|*[!0-9]*)
-    echo "invalid PG_STOP_TIMEOUT: $TIMEOUT" >&2
-    exit 1
-    ;;
-esac
-
-exec "${PG_BIN_DIR}/pg_ctl" \
-  -D "${PGDATA}" \
-  stop \
-  -m "${MODE}" \
-  -w \
-  -t "${TIMEOUT}"
-```
-
-### `/usr/local/bin/pgvm-postgres-reload`
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-source /run/pgvm/cluster.env
-
-if [[ -z "${PG_BIN_DIR:-}" ]]; then
-  : "${PGMAJOR:?PGMAJOR is required when PG_BIN_DIR is not set}"
-  PG_BIN_DIR="/usr/pgsql-${PGMAJOR}/bin"
-fi
-
-exec "${PG_BIN_DIR}/pg_ctl" -D "${PGDATA}" reload
-```
-
-### `/usr/local/bin/pgvm-postgres-stop-post`
-
-```bash
-#!/bin/bash
-set -euo pipefail
-rm -f /run/pgvm/stop.env
-```
-
-PostgreSQL supports three shutdown modes for `pg_ctl stop -m`: `smart`, `fast`, and `immediate`. `fast` is the `pg_ctl` default and is usually the right default for service stop; `smart` waits for clients to leave; `immediate` aborts without clean shutdown and forces crash recovery at the next start. PostgreSQL also documents that direct signals map to these modes: `SIGTERM` is smart, `SIGINT` is fast, and `SIGQUIT` is immediate. ([postgresql.org][2])
-
-## 5) Clean start/stop/restart/reload flows
-
-Start, once `cluster.env` exists:
-
-```bash
-systemctl start pgvm-postgres.service
-```
-
-Stop with defaults:
-
-```bash
-systemctl stop pgvm-postgres.service
-```
-
-Stop with a custom mode and timeout:
-
-```bash
-cat > /run/pgvm/stop.env <<'EOF'
-PG_STOP_MODE=smart
-PG_STOP_TIMEOUT=300
-EOF
-
-systemctl stop pgvm-postgres.service
-```
-
-Restart:
-
-```bash
-systemctl restart pgvm-postgres.service
-```
-
-Reload config:
-
-```bash
-systemctl reload pgvm-postgres.service
-```
-
-`pg_ctl reload` causes the server to reread configuration files such as `postgresql.conf` and `pg_hba.conf`. ([postgresql.org][2])
-
-## 6) Generic operations wrapper
-
-Create `/usr/local/bin/pgvm-postgres-op`:
-
-```bash
-#!/bin/bash
-set -euo pipefail
-
-OP="${1:?operation required}"
-
-resolve_bin_dir() {
-  local major="$1"
-  local bindir="${2:-}"
-  if [[ -n "$bindir" ]]; then
-    echo "$bindir"
-  else
-    echo "/usr/pgsql-${major}/bin"
-  fi
-}
-
-case "$OP" in
-  init)
-    source /run/pgvm/op.env
-
-    : "${PG_INIT_PGDATA:?required}"
-    : "${PG_INIT_PGMAJOR:?required unless PG_INIT_BIN_DIR is set}"
-
-    BIN_DIR="$(resolve_bin_dir "${PG_INIT_PGMAJOR}" "${PG_INIT_BIN_DIR:-}")"
-
-    args=( -D "${PG_INIT_PGDATA}" )
-
-    [[ -n "${PG_INIT_USERNAME:-}" ]] && args+=( --username="${PG_INIT_USERNAME}" )
-    [[ -n "${PG_INIT_PWFILE:-}" ]] && args+=( --pwfile="${PG_INIT_PWFILE}" )
-    [[ -n "${PG_INIT_AUTH:-}" ]] && args+=( --auth="${PG_INIT_AUTH}" )
-    [[ -n "${PG_INIT_AUTH_HOST:-}" ]] && args+=( --auth-host="${PG_INIT_AUTH_HOST}" )
-    [[ -n "${PG_INIT_AUTH_LOCAL:-}" ]] && args+=( --auth-local="${PG_INIT_AUTH_LOCAL}" )
-    [[ -n "${PG_INIT_ENCODING:-}" ]] && args+=( --encoding="${PG_INIT_ENCODING}" )
-    [[ -n "${PG_INIT_LOCALE:-}" ]] && args+=( --locale="${PG_INIT_LOCALE}" )
-    [[ -n "${PG_INIT_LOCALE_PROVIDER:-}" ]] && args+=( --locale-provider="${PG_INIT_LOCALE_PROVIDER}" )
-    [[ -n "${PG_INIT_ICU_LOCALE:-}" ]] && args+=( --icu-locale="${PG_INIT_ICU_LOCALE}" )
-    [[ -n "${PG_INIT_WALDIR:-}" ]] && args+=( --waldir="${PG_INIT_WALDIR}" )
-    [[ -n "${PG_INIT_WAL_SEGSIZE:-}" ]] && args+=( --wal-segsize="${PG_INIT_WAL_SEGSIZE}" )
-
-    if [[ "${PG_INIT_ALLOW_GROUP_ACCESS:-no}" == "yes" ]]; then
-      args+=( --allow-group-access )
-    fi
-
-    if [[ "${PG_INIT_DATA_CHECKSUMS:-on}" == "on" ]]; then
-      args+=( --data-checksums )
-    else
-      args+=( --no-data-checksums )
-    fi
-
-    exec "${BIN_DIR}/initdb" "${args[@]}"
-    ;;
-
-  basebackup)
-    source /run/pgvm/op.env
-
-    : "${PG_BB_PGMAJOR:?required unless PG_BB_BIN_DIR is set}"
-    : "${PG_BB_SOURCE_CONNSTR:?required}"
-    : "${PG_BB_TARGET_DIR:?required}"
-
-    BIN_DIR="$(resolve_bin_dir "${PG_BB_PGMAJOR}" "${PG_BB_BIN_DIR:-}")"
-
-    args=(
-      --dbname="${PG_BB_SOURCE_CONNSTR}"
-      --pgdata="${PG_BB_TARGET_DIR}"
-    )
-
-    [[ -n "${PG_BB_FORMAT:-}" ]] && args+=( --format="${PG_BB_FORMAT}" )
-    [[ -n "${PG_BB_WAL_METHOD:-}" ]] && args+=( --wal-method="${PG_BB_WAL_METHOD}" )
-    [[ -n "${PG_BB_SLOT:-}" ]] && args+=( --slot="${PG_BB_SLOT}" )
-    [[ -n "${PG_BB_MAX_RATE:-}" ]] && args+=( --max-rate="${PG_BB_MAX_RATE}" )
-    [[ -n "${PG_BB_LABEL:-}" ]] && args+=( --label="${PG_BB_LABEL}" )
-    [[ -n "${PG_BB_COMPRESS:-}" ]] && args+=( --compress="${PG_BB_COMPRESS}" )
-    [[ -n "${PG_BB_INCREMENTAL_MANIFEST:-}" ]] && args+=( --incremental="${PG_BB_INCREMENTAL_MANIFEST}" )
-
-    [[ "${PG_BB_CREATE_SLOT:-no}" == "yes" ]] && args+=( --create-slot )
-    [[ "${PG_BB_WRITE_RECOVERY_CONF:-no}" == "yes" ]] && args+=( --write-recovery-conf )
-    [[ "${PG_BB_PROGRESS:-yes}" == "yes" ]] && args+=( --progress )
-    [[ "${PG_BB_NO_SYNC:-no}" == "yes" ]] && args+=( --no-sync )
-
-    exec "${BIN_DIR}/pg_basebackup" "${args[@]}"
-    ;;
-
-  rewind)
-    source /run/pgvm/op.env
-
-    : "${PG_RW_PGMAJOR:?required unless PG_RW_BIN_DIR is set}"
-    : "${PG_RW_TARGET_PGDATA:?required}"
-
-    BIN_DIR="$(resolve_bin_dir "${PG_RW_PGMAJOR}" "${PG_RW_BIN_DIR:-}")"
-
-    args=( --target-pgdata="${PG_RW_TARGET_PGDATA}" )
-
-    if [[ -n "${PG_RW_SOURCE_PGDATA:-}" ]]; then
-      args+=( --source-pgdata="${PG_RW_SOURCE_PGDATA}" )
-    elif [[ -n "${PG_RW_SOURCE_CONNSTR:-}" ]]; then
-      args+=( --source-server="${PG_RW_SOURCE_CONNSTR}" )
-    else
-      echo "set PG_RW_SOURCE_PGDATA or PG_RW_SOURCE_CONNSTR" >&2
-      exit 1
-    fi
-
-    [[ "${PG_RW_WRITE_RECOVERY_CONF:-no}" == "yes" ]] && args+=( --write-recovery-conf )
-    [[ "${PG_RW_RESTORE_TARGET_WAL:-no}" == "yes" ]] && args+=( --restore-target-wal )
-    [[ "${PG_RW_DRY_RUN:-no}" == "yes" ]] && args+=( --dry-run )
-    [[ "${PG_RW_PROGRESS:-yes}" == "yes" ]] && args+=( --progress )
-    [[ "${PG_RW_NO_SYNC:-no}" == "yes" ]] && args+=( --no-sync )
-    [[ "${PG_RW_NO_ENSURE_SHUTDOWN:-no}" == "yes" ]] && args+=( --no-ensure-shutdown )
-    [[ -n "${PG_RW_CONFIG_FILE:-}" ]] && args+=( --config-file="${PG_RW_CONFIG_FILE}" )
-
-    exec "${BIN_DIR}/pg_rewind" "${args[@]}"
-    ;;
-
-  checkpoint)
-    source /run/pgvm/op.env
-    : "${PG_CP_CONNSTR:?required}"
-    exec psql "${PG_CP_CONNSTR}" -v ON_ERROR_STOP=1 -X -c 'CHECKPOINT'
-    ;;
-
-  promote)
-    source /run/pgvm/op.env
-    : "${PG_PROMOTE_CONNSTR:?required}"
-    WAIT="${PG_PROMOTE_WAIT:-true}"
-    WAIT_SECONDS="${PG_PROMOTE_WAIT_SECONDS:-60}"
-    exec psql "${PG_PROMOTE_CONNSTR}" -v ON_ERROR_STOP=1 -X -c "SELECT pg_promote(${WAIT}, ${WAIT_SECONDS});"
-    ;;
-
-  *)
-    echo "unsupported operation: $OP" >&2
-    exit 1
-    ;;
-esac
-```
-
-## 7) Supported dynamic parameters
-
-This is the whitelist I would support.
-
-For **stop**:
-
-* `PG_STOP_MODE=smart|fast|immediate`
-* `PG_STOP_TIMEOUT=<seconds>`
-  Defaults:
-* `fast`
-* `90`
-
-For **initdb**:
-
-* `PG_INIT_PGDATA` required
-* `PG_INIT_PGMAJOR` or `PG_INIT_BIN_DIR`
-* `PG_INIT_USERNAME`
-* `PG_INIT_PWFILE`
-* `PG_INIT_AUTH`
-* `PG_INIT_AUTH_HOST`
-* `PG_INIT_AUTH_LOCAL`
-* `PG_INIT_ENCODING`
-* `PG_INIT_LOCALE`
-* `PG_INIT_LOCALE_PROVIDER`
-* `PG_INIT_ICU_LOCALE`
-* `PG_INIT_WALDIR`
-* `PG_INIT_WAL_SEGSIZE`
-* `PG_INIT_ALLOW_GROUP_ACCESS=yes|no`
-* `PG_INIT_DATA_CHECKSUMS=on|off`
-
-`initdb` supports setting auth method, encoding, locale, locale provider, ICU locale, WAL directory, bootstrap user, and checksum behavior. Current PostgreSQL docs say checksums are enabled by default, but because you run multiple major versions, set checksum behavior explicitly in your wrapper rather than depending on version-specific defaults. ([postgresql.org][3])
-
-For **basebackup**:
-
-* `PG_BB_PGMAJOR` or `PG_BB_BIN_DIR`
-* `PG_BB_SOURCE_CONNSTR` required
-* `PG_BB_TARGET_DIR` required
-* `PG_BB_FORMAT=plain|tar`
-* `PG_BB_WAL_METHOD=stream|fetch|none`
-* `PG_BB_SLOT`
-* `PG_BB_CREATE_SLOT=yes|no`
-* `PG_BB_MAX_RATE`
-* `PG_BB_LABEL`
-* `PG_BB_COMPRESS`
-* `PG_BB_INCREMENTAL_MANIFEST`
-* `PG_BB_WRITE_RECOVERY_CONF=yes|no`
-* `PG_BB_PROGRESS=yes|no`
-* `PG_BB_NO_SYNC=yes|no`
-
-`pg_basebackup` takes a base backup of a running cluster over the replication protocol. The connecting role must have `REPLICATION` or be superuser, `pg_hba.conf` must allow the replication connection, and the server needs enough `max_wal_senders`. It can back up a primary or a standby; on a standby, `full_page_writes` must be enabled on the primary. Common flags include `--wal-method`, `--slot`, `--create-slot`, `--max-rate`, `--compress`, `--write-recovery-conf`, and `--incremental`. ([postgresql.org][4])
-
-For **rewind**:
-
-* `PG_RW_PGMAJOR` or `PG_RW_BIN_DIR`
-* `PG_RW_TARGET_PGDATA` required
-* exactly one of `PG_RW_SOURCE_PGDATA` or `PG_RW_SOURCE_CONNSTR`
-* `PG_RW_WRITE_RECOVERY_CONF=yes|no`
-* `PG_RW_RESTORE_TARGET_WAL=yes|no`
-* `PG_RW_DRY_RUN=yes|no`
-* `PG_RW_PROGRESS=yes|no`
-* `PG_RW_NO_SYNC=yes|no`
-* `PG_RW_NO_ENSURE_SHUTDOWN=yes|no`
-* `PG_RW_CONFIG_FILE`
-
-`pg_rewind` is for resynchronizing a diverged former primary with the new source cluster. The target must be shut down cleanly unless you let `pg_rewind` ensure shutdown itself; source can be an offline data directory or a running server connection. `--restore-target-wal` can fetch missing WAL using the target cluster’s `restore_command`, and `--write-recovery-conf` creates `standby.signal` plus recovery connection settings, but it requires `--source-server`. ([postgresql.org][5])
-
-For **checkpoint**:
-
-* `PG_CP_CONNSTR` required
-
-The wrapper simply runs `CHECKPOINT` through `psql`. PostgreSQL documents that `CHECKPOINT` forces an immediate checkpoint and is not intended for normal operation; only superusers or users with the `pg_checkpoint` role can execute it. ([postgresql.org][6])
-
-For **promote**:
-
-* `PG_PROMOTE_CONNSTR` required
-* `PG_PROMOTE_WAIT=true|false`
-* `PG_PROMOTE_WAIT_SECONDS=<seconds>`
-
-Using `SELECT pg_promote(wait, wait_seconds)` is clean because the parameters are explicit and documented. PostgreSQL also documents `pg_ctl promote` as a valid promote path, but the SQL function gives you easy runtime control over wait behavior from `vm-control`. ([postgresql.org][7])
-
-## 8) How `vm-control` should use this
-
-For server start:
-
-1. write `/run/pgvm/cluster.env`
-2. `systemctl start pgvm-postgres.service`
-
-For server stop:
-
-1. optionally write `/run/pgvm/stop.env`
-2. `systemctl stop pgvm-postgres.service`
-
-For init/basebackup/rewind/checkpoint/promote:
-
-1. write `/run/pgvm/op.env`
-2. `systemctl start pgvm-postgres-op@<operation>.service`
-
-That gives you:
-
-* `vm-control` and its supervisor in one cgroup
-* PostgreSQL daemon in another
-* each maintenance job in its own oneshot unit
-
-## 9) Enable and load the units
-
-```bash
-chmod 755 /usr/local/bin/pgvm-postgres-launch
-chmod 755 /usr/local/bin/pgvm-postgres-stop
-chmod 755 /usr/local/bin/pgvm-postgres-reload
-chmod 755 /usr/local/bin/pgvm-postgres-stop-post
-chmod 755 /usr/local/bin/pgvm-postgres-op
-
-systemctl daemon-reload
-systemctl enable pgvm-postgres.service
-```
-
-I would **not** enable the operation unit; it should be started only on demand.
-
-## 10) My blunt recommendation
-
-This is the clean production shape:
-
-* one generic **daemon** unit: `pgvm-postgres.service`
-* one generic **ops** template: `pgvm-postgres-op@.service`
-* runtime state under `/run/pgvm/`
-* all runtime choices controlled by files written by `vm-control`
-* whitelisted PostgreSQL-supported parameters only, not arbitrary command pass-through
-
-That gives you a stable control plane, clear cgroup boundaries, dynamic stop modes with sane defaults, and clean separation between “server lifecycle” and “administrative jobs.”
-
-[1]: https://man7.org/linux/man-pages/man5/systemd.service.5.html "systemd.service(5) - Linux manual page"
-[2]: https://www.postgresql.org/docs/current/app-pg-ctl.html "PostgreSQL: Documentation: 18: pg_ctl"
-[3]: https://www.postgresql.org/docs/current/app-initdb.html "PostgreSQL: Documentation: 18: initdb"
-[4]: https://www.postgresql.org/docs/current/app-pgbasebackup.html "PostgreSQL: Documentation: 18: pg_basebackup"
-[5]: https://www.postgresql.org/docs/current/app-pgrewind.html "PostgreSQL: Documentation: 18: pg_rewind"
-[6]: https://www.postgresql.org/docs/current/sql-checkpoint.html "PostgreSQL: Documentation: 18: CHECKPOINT"
-[7]: https://www.postgresql.org/docs/current/functions-admin.html "PostgreSQL: Documentation: 18: 9.28. System Administration Functions"
-
-
-Assuming you set up these two units:
-
-* `pgvm-postgres.service`
-* `pgvm-postgres-op@.service`
-
-and these runtime files:
-
-* `/run/pgvm/cluster.env`
-* `/run/pgvm/stop.env`
-* `/run/pgvm/op.env`
-
-here are the exact ways to invoke everything.
-
-## 0) First time after creating or changing unit files
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable vm-control.service
-sudo systemctl enable pgvm-postgres.service
-```
-
-If you only change `/run/pgvm/*.env`, you do **not** need `daemon-reload`.
-
----
-
-## 1) Start PostgreSQL
-
-Write the runtime cluster info first.
-
-```bash
-sudo mkdir -p /run/pgvm
-
-sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
-PGMAJOR=16
-PG_BIN_DIR=/usr/pgsql-16/bin
-PGDATA=/data/local/mydb/16/data
-PGPORT=5432
-PGCLUSTER_NAME=mydb
-PGOPTS=
-EOF
-```
-
-Then start:
-
-```bash
-sudo systemctl start pgvm-postgres.service
-```
-
-Check status:
-
-```bash
-sudo systemctl status pgvm-postgres.service
-```
-
-See logs:
-
-```bash
-sudo journalctl -u pgvm-postgres.service -f
-```
-
----
-
-## 2) Stop PostgreSQL with defaults
-
-If you do nothing, your stop wrapper should default to:
-
-* `PG_STOP_MODE=fast`
-* `PG_STOP_TIMEOUT=90`
-
-So just do:
-
-```bash
-sudo systemctl stop pgvm-postgres.service
-```
-
----
-
-## 3) Stop PostgreSQL with dynamic stop mode
-
-### Smart shutdown
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=smart
-PG_STOP_TIMEOUT=300
-EOF
-
-sudo systemctl stop pgvm-postgres.service
-```
-
-### Fast shutdown
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=fast
-PG_STOP_TIMEOUT=90
-EOF
-
-sudo systemctl stop pgvm-postgres.service
-```
-
-### Immediate shutdown
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=immediate
-PG_STOP_TIMEOUT=30
-EOF
-
-sudo systemctl stop pgvm-postgres.service
-```
-
----
-
-## 4) Restart PostgreSQL
-
-Normal restart:
-
-```bash
-sudo systemctl restart pgvm-postgres.service
-```
-
-Restart with a chosen stop mode first:
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=fast
-PG_STOP_TIMEOUT=120
-EOF
-
-sudo systemctl restart pgvm-postgres.service
-```
-
----
-
-## 5) Reload PostgreSQL config
-
-```bash
-sudo systemctl reload pgvm-postgres.service
-```
-
-Check status after reload:
-
-```bash
-sudo systemctl status pgvm-postgres.service
-```
-
----
-
-## 6) Init a new database cluster
-
-Write operation parameters:
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_INIT_PGMAJOR=16
-PG_INIT_BIN_DIR=/usr/pgsql-16/bin
-PG_INIT_PGDATA=/data/local/mydb/16/data
-PG_INIT_USERNAME=postgres
-PG_INIT_AUTH=scram-sha-256
-PG_INIT_AUTH_HOST=scram-sha-256
-PG_INIT_AUTH_LOCAL=peer
-PG_INIT_ENCODING=UTF8
-PG_INIT_LOCALE=en_US.UTF-8
-PG_INIT_DATA_CHECKSUMS=on
-EOF
-```
-
-Run init:
-
-```bash
-sudo systemctl start pgvm-postgres-op@init.service
-```
-
-See logs:
-
-```bash
-sudo journalctl -u pgvm-postgres-op@init.service -n 200 --no-pager
-```
-
-Then write cluster state and start Postgres:
-
-```bash
-sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
-PGMAJOR=16
-PG_BIN_DIR=/usr/pgsql-16/bin
-PGDATA=/data/local/mydb/16/data
-PGPORT=5432
-PGCLUSTER_NAME=mydb
-PGOPTS=
-EOF
-
-sudo systemctl start pgvm-postgres.service
-```
-
----
-
-## 7) Run pg_basebackup
-
-Example from a primary using a replication user:
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_BB_PGMAJOR=16
-PG_BB_BIN_DIR=/usr/pgsql-16/bin
-PG_BB_SOURCE_CONNSTR=host=10.0.0.10 port=5432 user=replicator dbname=postgres
-PG_BB_TARGET_DIR=/data/local/mydb/16/data
-PG_BB_FORMAT=plain
-PG_BB_WAL_METHOD=stream
-PG_BB_PROGRESS=yes
-PG_BB_WRITE_RECOVERY_CONF=yes
-PG_BB_CREATE_SLOT=no
-PG_BB_NO_SYNC=no
-EOF
-```
-
-Run it:
-
-```bash
-sudo systemctl start pgvm-postgres-op@basebackup.service
-```
-
-Follow logs:
-
-```bash
-sudo journalctl -u pgvm-postgres-op@basebackup.service -f
-```
-
-A heavier example with slot, rate limit, label, compression:
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_BB_PGMAJOR=16
-PG_BB_BIN_DIR=/usr/pgsql-16/bin
-PG_BB_SOURCE_CONNSTR=host=10.0.0.10 port=5432 user=replicator dbname=postgres
-PG_BB_TARGET_DIR=/data/local/mydb/16/data
-PG_BB_FORMAT=plain
-PG_BB_WAL_METHOD=stream
-PG_BB_SLOT=standby_mydb_01
-PG_BB_CREATE_SLOT=yes
-PG_BB_MAX_RATE=100M
-PG_BB_LABEL=mydb_standby_seed
-PG_BB_COMPRESS=server-gzip
-PG_BB_PROGRESS=yes
-PG_BB_WRITE_RECOVERY_CONF=yes
-EOF
-
-sudo systemctl start pgvm-postgres-op@basebackup.service
-```
-
----
-
-## 8) Run pg_rewind
-
-### Rewind from source server connection
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_RW_PGMAJOR=16
-PG_RW_BIN_DIR=/usr/pgsql-16/bin
-PG_RW_TARGET_PGDATA=/data/local/mydb/16/data
-PG_RW_SOURCE_CONNSTR=host=10.0.0.11 port=5432 user=postgres dbname=postgres
-PG_RW_WRITE_RECOVERY_CONF=yes
-PG_RW_PROGRESS=yes
-PG_RW_NO_SYNC=no
-EOF
-
-sudo systemctl start pgvm-postgres-op@rewind.service
-```
-
-### Dry run first
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_RW_PGMAJOR=16
-PG_RW_BIN_DIR=/usr/pgsql-16/bin
-PG_RW_TARGET_PGDATA=/data/local/mydb/16/data
-PG_RW_SOURCE_CONNSTR=host=10.0.0.11 port=5432 user=postgres dbname=postgres
-PG_RW_DRY_RUN=yes
-PG_RW_PROGRESS=yes
-EOF
-
-sudo systemctl start pgvm-postgres-op@rewind.service
-```
-
-### Rewind from source data directory
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_RW_PGMAJOR=16
-PG_RW_BIN_DIR=/usr/pgsql-16/bin
-PG_RW_TARGET_PGDATA=/data/local/mydb/16/data
-PG_RW_SOURCE_PGDATA=/data/source_cluster/16/data
-PG_RW_PROGRESS=yes
-EOF
-
-sudo systemctl start pgvm-postgres-op@rewind.service
-```
-
----
-
-## 9) Run a CHECKPOINT
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_CP_CONNSTR=postgresql://postgres@127.0.0.1:5432/postgres
-EOF
-
-sudo systemctl start pgvm-postgres-op@checkpoint.service
-```
-
-Check logs:
-
-```bash
-sudo journalctl -u pgvm-postgres-op@checkpoint.service -n 100 --no-pager
-```
-
----
-
-## 10) Promote a standby
-
-### Wait until promotion completes
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_PROMOTE_CONNSTR=postgresql://postgres@127.0.0.1:5432/postgres
-PG_PROMOTE_WAIT=true
-PG_PROMOTE_WAIT_SECONDS=60
-EOF
-
-sudo systemctl start pgvm-postgres-op@promote.service
-```
-
-### Fire and return quickly
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_PROMOTE_CONNSTR=postgresql://postgres@127.0.0.1:5432/postgres
-PG_PROMOTE_WAIT=false
-PG_PROMOTE_WAIT_SECONDS=0
-EOF
-
-sudo systemctl start pgvm-postgres-op@promote.service
-```
-
----
-
-## 11) Common inspection commands
-
-See whether PostgreSQL is active:
-
-```bash
-sudo systemctl is-active pgvm-postgres.service
-```
-
-See whether it is enabled on boot:
-
-```bash
-sudo systemctl is-enabled pgvm-postgres.service
-```
-
-Show recent logs:
-
-```bash
-sudo journalctl -u pgvm-postgres.service -n 200 --no-pager
-```
-
-Show operation logs:
-
-```bash
-sudo journalctl -u pgvm-postgres-op@basebackup.service -n 200 --no-pager
-sudo journalctl -u pgvm-postgres-op@rewind.service -n 200 --no-pager
-sudo journalctl -u pgvm-postgres-op@init.service -n 200 --no-pager
-sudo journalctl -u pgvm-postgres-op@checkpoint.service -n 200 --no-pager
-sudo journalctl -u pgvm-postgres-op@promote.service -n 200 --no-pager
-```
-
-Reset failed unit state if needed:
-
-```bash
-sudo systemctl reset-failed pgvm-postgres.service
-sudo systemctl reset-failed pgvm-postgres-op@basebackup.service
-```
-
----
-
-## 12) Full realistic flows
-
-### A. New database creation flow
-
-```bash
-sudo tee /run/pgvm/op.env >/dev/null <<'EOF'
-PG_INIT_PGMAJOR=16
-PG_INIT_BIN_DIR=/usr/pgsql-16/bin
-PG_INIT_PGDATA=/data/local/orders/16/data
-PG_INIT_USERNAME=postgres
-PG_INIT_AUTH=scram-sha-256
-PG_INIT_AUTH_HOST=scram-sha-256
-PG_INIT_AUTH_LOCAL=peer
-PG_INIT_ENCODING=UTF8
-PG_INIT_LOCALE=en_US.UTF-8
-PG_INIT_DATA_CHECKSUMS=on
-EOF
-
-sudo systemctl start pgvm-postgres-op@init.service
-
-sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
-PGMAJOR=16
-PG_BIN_DIR=/usr/pgsql-16/bin
-PGDATA=/data/local/orders/16/data
-PGPORT=5432
-PGCLUSTER_NAME=orders
-PGOPTS=
-EOF
-
-sudo systemctl start pgvm-postgres.service
-```
-
-### B. Existing persistent disk boot flow
-
-```bash
-sudo tee /run/pgvm/cluster.env >/dev/null <<'EOF'
-PGMAJOR=14
-PG_BIN_DIR=/usr/pgsql-14/bin
-PGDATA=/data/local/existingdb/14/data
-PGPORT=5432
-PGCLUSTER_NAME=existingdb
-PGOPTS=
-EOF
-
-sudo systemctl start pgvm-postgres.service
-```
-
-### C. Planned graceful maintenance stop
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=smart
-PG_STOP_TIMEOUT=600
-EOF
-
-sudo systemctl stop pgvm-postgres.service
-```
-
-### D. Normal operational restart
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=fast
-PG_STOP_TIMEOUT=120
-EOF
-
-sudo systemctl restart pgvm-postgres.service
-```
-
-### E. Emergency stop
-
-```bash
-sudo tee /run/pgvm/stop.env >/dev/null <<'EOF'
-PG_STOP_MODE=immediate
-PG_STOP_TIMEOUT=30
-EOF
-
-sudo systemctl stop pgvm-postgres.service
-```
-
----
-
-## 13) What `vm-control` would actually run
-
-For start:
-
-```bash
-systemctl start pgvm-postgres.service
-```
-
-For stop with defaults:
-
-```bash
-rm -f /run/pgvm/stop.env
-systemctl stop pgvm-postgres.service
-```
-
-For stop with smart mode:
-
-```bash
-cat > /run/pgvm/stop.env <<'EOF'
-PG_STOP_MODE=smart
-PG_STOP_TIMEOUT=300
-EOF
-systemctl stop pgvm-postgres.service
-```
-
-For basebackup:
-
-```bash
-cat > /run/pgvm/op.env <<'EOF'
-PG_BB_PGMAJOR=16
-PG_BB_BIN_DIR=/usr/pgsql-16/bin
-PG_BB_SOURCE_CONNSTR=host=10.0.0.10 port=5432 user=replicator dbname=postgres
-PG_BB_TARGET_DIR=/data/local/mydb/16/data
-PG_BB_WAL_METHOD=stream
-PG_BB_PROGRESS=yes
-PG_BB_WRITE_RECOVERY_CONF=yes
-EOF
-systemctl start pgvm-postgres-op@basebackup.service
-```
-
----
-
-If you want, I can next give you the same thing as a **single README-style runbook** with the exact unit files and wrapper scripts in one place.
+## 31. Acceptance criteria
+
+The implementation is done when:
+
+1. Agent starts on RHEL 8 without sudo.
+2. `curl /healthz` returns ok.
+3. `curl /v1/static` returns OS, kernel, CPU, memory, disk inventory.
+4. `curl /v1/cpu` returns live CPU usage.
+5. `curl /v1/memory` returns memory usage.
+6. `curl /v1/swap` returns swap usage.
+7. `curl /v1/disk` returns disk inventory from `lsblk` and `/sys`.
+8. `curl /v1/io` returns read/write rates from `/proc/diskstats`.
+9. `curl /v1/mounts` returns mountpoints and filesystem usage.
+10. `curl /v1/lvm` returns LVM info if available or partial info from `lsblk`.
+11. `curl /v1/top` returns top-N processes.
+12. `curl /v1/snapshot` returns merged host image.
+13. `?format=text` works for major endpoints.
+14. Missing `nvme` command does not fail anything.
+15. Missing sudo does not fail anything.
+16. gRPC stream starts and sends snapshot/heartbeat messages.
+17. gRPC can change sampling frequency dynamically.
+18. Memory usage stays bounded.
+19. Command timeouts work.
+20. Adding a new command requires editing only command catalog + collector module + route if needed.
+
+## 32. First implementation order
+
+Build in this order:
+
+1. Project skeleton and config loader.
+2. Health endpoint.
+3. Command runner with timeout and concurrency limit.
+4. `/proc/meminfo`, `/proc/stat`, `/proc/diskstats` parsers.
+5. CPU, memory, swap endpoints.
+6. Disk endpoint using `lsblk` and `/sys/block`.
+7. IO rate calculation using previous `/proc/diskstats` sample.
+8. Mounts endpoint using `/proc/self/mountinfo` and `df -P -B1` fallback.
+9. Top processes using `/proc/[pid]` scan.
+10. Static snapshot endpoint.
+11. Full `/v1/snapshot` endpoint.
+12. Scheduler and cache refresh.
+13. gRPC proto and service.
+14. Dynamic sampling update through gRPC.
+15. Node.js host-profile integration.
+
+## 33. Copilot instruction
+
+When generating code, follow this strictly:
+
+- Prefer direct `/proc` and `/sys` parsing over shell commands.
+- Use commands only when the information is hard to get directly.
+- Never use sudo.
+- Never assume `nvme`, `iostat`, `sar`, `dmidecode`, or `smartctl` exist.
+- Every command must have timeout.
+- Every command must be optional unless explicitly critical.
+- All endpoint responses must be JSON by default.
+- All endpoint responses must support `?format=text`.
+- Keep modules small and categorized.
+- Add unit tests for parsers using sample strings.
+- Add integration tests for `/healthz`, `/v1/cpu`, `/v1/memory`, `/v1/snapshot`.
+- Avoid large allocations and unbounded vectors.
+- Keep top process count configurable.
+- Do not stream full process table over gRPC by default.
+- The first version should be simple and reliable, not feature-heavy.
 
